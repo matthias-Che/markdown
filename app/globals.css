@@ -1,0 +1,192 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Prose / markdown styling */
+.markdown-body {
+  font-size: 1.0625rem;
+  line-height: 1.8;
+  color: #1e293b;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  font-weight: 700;
+  line-height: 1.3;
+  margin-top: 2em;
+  margin-bottom: 0.6em;
+  color: #166534; /* forest green */
+}
+
+.markdown-body h1 {
+  font-size: 2.25rem;
+  border-bottom: 2px solid #bbf7d0;
+  padding-bottom: 0.35em;
+  margin-top: 0.5em;
+}
+
+.markdown-body h2 {
+  font-size: 1.65rem;
+  border-bottom: 1px solid #d1fae5;
+  padding-bottom: 0.25em;
+}
+
+.markdown-body h3 { font-size: 1.3rem; color: #15803d; }
+.markdown-body h4 { font-size: 1.1rem; color: #16a34a; }
+
+.markdown-body p {
+  margin-bottom: 1.25em;
+}
+
+.markdown-body a {
+  color: #15803d;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  transition: color 0.15s;
+}
+.markdown-body a:hover { color: #166534; }
+
+.markdown-body strong { color: #0f172a; font-weight: 700; }
+.markdown-body em { color: #334155; }
+
+/* Code */
+.markdown-body code {
+  background: #fff1f2;
+  color: #be123c;
+  border: 1px solid #fecdd3;
+  border-radius: 4px;
+  padding: 0.15em 0.45em;
+  font-size: 0.875em;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+.markdown-body pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  overflow-x: auto;
+  margin: 1.5em 0;
+  border: 1px solid #1e293b;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.12);
+}
+
+.markdown-body pre code {
+  background: transparent;
+  color: inherit;
+  border: none;
+  padding: 0;
+  font-size: 0.9em;
+}
+
+/* Blockquote */
+.markdown-body blockquote {
+  border-left: 4px solid #16a34a;
+  background: #f0fdf4;
+  margin: 1.5em 0;
+  padding: 0.75em 1.25em;
+  border-radius: 0 8px 8px 0;
+  color: #374151;
+  font-style: italic;
+}
+
+.markdown-body blockquote p { margin: 0; }
+
+/* Lists */
+.markdown-body ul { list-style: none; padding-left: 0; margin-bottom: 1.25em; }
+.markdown-body ol { padding-left: 1.75em; margin-bottom: 1.25em; }
+
+.markdown-body ul > li {
+  padding-left: 1.5em;
+  position: relative;
+  margin-bottom: 0.4em;
+}
+
+.markdown-body ul > li::before {
+  content: '';
+  position: absolute;
+  left: 0.3em;
+  top: 0.65em;
+  width: 7px;
+  height: 7px;
+  background: #16a34a;
+  border-radius: 50%;
+}
+
+.markdown-body ol > li { margin-bottom: 0.4em; }
+
+/* Tables */
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1.5em 0;
+  font-size: 0.95em;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+}
+
+.markdown-body thead tr {
+  background: #166534;
+  color: #fff;
+}
+
+.markdown-body th {
+  padding: 0.75em 1em;
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.875em;
+  letter-spacing: 0.03em;
+}
+
+.markdown-body td {
+  padding: 0.65em 1em;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.markdown-body tbody tr:nth-child(even) { background: #f8fafc; }
+.markdown-body tbody tr:hover { background: #f0fdf4; transition: background 0.12s; }
+
+/* HR */
+.markdown-body hr {
+  border: none;
+  border-top: 2px solid #d1fae5;
+  margin: 2.5em 0;
+}
+
+/* Images */
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+  margin: 1em 0;
+}
+
+/* KaTeX block equations */
+.markdown-body .math-display {
+  overflow-x: auto;
+  padding: 1em 0;
+}
+
+/* Scrollbar for raw editor */
+.raw-editor {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+}
+.raw-editor::-webkit-scrollbar { width: 6px; height: 6px; }
+.raw-editor::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
