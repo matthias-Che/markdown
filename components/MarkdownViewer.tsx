@@ -30,6 +30,16 @@ export default function MarkdownViewer() {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName ?? "document.md";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [content, fileName]);
+
   const loadFile = useCallback((file: File) => {
     if (!file.name.endsWith(".md") && !file.name.endsWith(".markdown")) {
       alert("Please upload a Markdown file (.md or .markdown).");
@@ -75,7 +85,7 @@ export default function MarkdownViewer() {
 
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className="h-screen flex flex-col"
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -171,14 +181,27 @@ export default function MarkdownViewer() {
           </div>
         ) : (
           <div className="flex-1 flex overflow-hidden divide-x divide-slate-200">
-            {/* Raw pane */}
-            <div className="w-1/2 overflow-y-auto bg-slate-900 raw-editor">
-              <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-700 sticky top-0 bg-slate-900 z-10">
-                <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Raw</span>
+            {/* Editable raw pane */}
+            <div className="w-1/2 flex flex-col bg-slate-900 raw-editor">
+              <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 sticky top-0 bg-slate-900 z-10 flex-shrink-0">
+                <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Edit</span>
+                <button
+                  onClick={handleDownload}
+                  className="flex items-center gap-1.5 bg-green-700 hover:bg-green-600 text-white text-xs font-medium px-3 py-1.5 rounded-md transition-colors"
+                >
+                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none">
+                    <path d="M6 1v7M3 8l3 3 3-3M1 10v1a1 1 0 001 1h8a1 1 0 001-1v-1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  Download
+                </button>
               </div>
-              <pre className="p-5 text-sm text-slate-300 font-mono whitespace-pre-wrap break-words leading-relaxed">
-                {content}
-              </pre>
+              <textarea
+                className="flex-1 w-full bg-transparent text-slate-300 font-mono text-sm leading-relaxed p-5 resize-none outline-none placeholder-slate-600 raw-editor"
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                spellCheck={false}
+                placeholder="Start typing Markdown here…"
+              />
             </div>
             {/* Preview pane */}
             <div className="w-1/2 overflow-y-auto bg-white">
