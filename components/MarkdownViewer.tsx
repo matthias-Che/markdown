@@ -512,6 +512,28 @@ export default function MarkdownViewer() {
   const splitPreviewScrollRef = useRef<HTMLDivElement>(null);
   const activeScrollRef = viewMode === "preview" ? previewScrollRef : splitPreviewScrollRef;
 
+  // Always-current refs for beforeunload flush
+  const latestTabsRef = useRef(tabs);
+  const latestContentRef = useRef(content);
+  const latestActiveTabIdRef = useRef(activeTabId);
+  useEffect(() => { latestTabsRef.current = tabs; }, [tabs]);
+  useEffect(() => { latestContentRef.current = content; }, [content]);
+  useEffect(() => { latestActiveTabIdRef.current = activeTabId; }, [activeTabId]);
+
+  // ── Force-flush tabs before page unload ───────────────────────────────────
+  useEffect(() => {
+    const flush = () => {
+      // Merge latest content into tabs array and save synchronously
+      const saved = latestTabsRef.current.map(t =>
+        t.id === latestActiveTabIdRef.current ? { ...t, content: latestContentRef.current } : t
+      );
+      lsSet(LS_TABS, JSON.stringify(saved));
+      lsSet(LS_ACTIVE_TAB, latestActiveTabIdRef.current);
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => window.removeEventListener("beforeunload", flush);
+  }, []);
+
   // ── Sync active tab content → tabs array (for persistence) ────────────────
   useEffect(() => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content } : t));
@@ -540,7 +562,13 @@ export default function MarkdownViewer() {
     return () => el.removeEventListener("scroll", fn);
   }, [activeScrollRef, activeTabId, viewMode]);
 
-  // ── Restore scroll on tab switch ──────────────────────────────────────────
+  // ── Smooth scroll helper ──────────────────────────────────────────────────
+  const smoothScrollTo = useCallback((el: HTMLDivElement, ratio: number) => {
+    const top = ratio * (el.scrollHeight - el.clientHeight);
+    el.scrollTo({ top, behavior: "smooth" });
+  }, []);
+
+  // ── Restore scroll on tab switch (smooth) ────────────────────────────────
   const pendingScrollRatio = useRef<number | null>(null);
   useEffect(() => {
     if (pendingScrollRatio.current === null) return;
@@ -548,22 +576,23 @@ export default function MarkdownViewer() {
     pendingScrollRatio.current = null;
     const t = setTimeout(() => {
       const el = activeScrollRef.current;
-      if (el) el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
+      if (el) smoothScrollTo(el, ratio);
     }, 80);
     return () => clearTimeout(t);
   });
 
-  // ── Restore scroll on initial mount ───────────────────────────────────────
+  // ── Restore scroll on initial page load (smooth, longer delay) ───────────
   const mountRestored = useRef(false);
   useEffect(() => {
     if (mountRestored.current) return;
     mountRestored.current = true;
     const ratio = activeTab.scrollRatio ?? 0;
     if (!ratio) return;
+    // Wait for the full content render before smooth-scrolling into position
     const t = setTimeout(() => {
       const el = activeScrollRef.current;
-      if (el) el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
-    }, 120);
+      if (el) smoothScrollTo(el, ratio);
+    }, 500);
     return () => clearTimeout(t);
   });
 
@@ -630,7 +659,7 @@ export default function MarkdownViewer() {
       return max > 0 ? el.scrollTop / max : 0;
     };
     const applyRatio = (el: HTMLDivElement | null, r: number) => {
-      if (el) requestAnimationFrame(() => { el.scrollTop = r * (el.scrollHeight - el.clientHeight); });
+      if (el) requestAnimationFrame(() => smoothScrollTo(el, r));
     };
     if (next === "split") {
       const r = getRatio(previewScrollRef.current);
@@ -823,7 +852,7 @@ export default function MarkdownViewer() {
       {/* Main */}
       <main className="flex-1 flex overflow-hidden relative">
         {viewMode === "preview" ? (
-          <div ref={previewScrollRef} className="flex-1 overflow-y-auto">
+          <div ref={previewScrollRef} className="flex-1 overflow-y-auto scroll-smooth">
             <div className="max-w-3xl mx-auto px-6 py-12">
               <MarkdownRenderer content={content} themeVars={themeVars} />
             </div>
@@ -857,7 +886,7 @@ export default function MarkdownViewer() {
                 onKeyDown={handleEditorKeyDown} spellCheck={false}
                 placeholder="Start typing Markdown here…" />
             </div>
-            <div ref={splitPreviewScrollRef} className="w-1/2 overflow-y-auto bg-white">
+            <div ref={splitPreviewScrollRef} className="w-1/2 overflow-y-auto bg-white scroll-smooth">
               <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white z-10">
                 <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Preview</span>
               </div>
