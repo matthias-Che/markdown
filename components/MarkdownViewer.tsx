@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useState, useCallback, useRef, useEffect, useReducer } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
@@ -25,18 +25,20 @@ function MarkdownRenderer({ content }: { content: string }) {
   );
 }
 
+type SetContent = (v: string, immediate?: boolean) => void;
+
 // Applies a markdown wrapping shortcut to a textarea
 function applyWrapping(
   textarea: HTMLTextAreaElement,
   before: string,
   after: string,
   placeholder: string,
-  onChange: (v: string) => void
+  onChange: SetContent
 ) {
   const { selectionStart: start, selectionEnd: end, value } = textarea;
   const selected = value.slice(start, end) || placeholder;
   const newValue = value.slice(0, start) + before + selected + after + value.slice(end);
-  onChange(newValue);
+  onChange(newValue, true);
   requestAnimationFrame(() => {
     textarea.focus();
     const cursorStart = start + before.length;
@@ -48,7 +50,7 @@ function applyWrapping(
 function applyLinePrefix(
   textarea: HTMLTextAreaElement,
   prefix: string,
-  onChange: (v: string) => void
+  onChange: SetContent
 ) {
   const { selectionStart, value } = textarea;
   const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
@@ -59,11 +61,40 @@ function applyLinePrefix(
   const newLine = alreadyHas ? line.slice(prefix.length) : prefix + line;
   const newValue = value.slice(0, lineStart) + newLine + value.slice(end);
   const offset = alreadyHas ? -prefix.length : prefix.length;
-  onChange(newValue);
+  onChange(newValue, true);
   requestAnimationFrame(() => {
     textarea.focus();
     textarea.setSelectionRange(selectionStart + offset, selectionStart + offset);
   });
+}
+
+// Undo/redo history for the editor
+interface HistoryState {
+  stack: string[];   // past snapshots
+  index: number;     // current position in stack
+}
+type HistoryAction =
+  | { type: "push"; value: string }
+  | { type: "undo" }
+  | { type: "redo" };
+
+function historyReducer(state: HistoryState, action: HistoryAction): HistoryState {
+  switch (action.type) {
+    case "push": {
+      if (state.stack[state.index] === action.value) return state;
+      const newStack = state.stack.slice(0, state.index + 1);
+      newStack.push(action.value);
+      // Cap history at 500 entries to avoid unbounded memory
+      const trimmed = newStack.length > 500 ? newStack.slice(newStack.length - 500) : newStack;
+      return { stack: trimmed, index: trimmed.length - 1 };
+    }
+    case "undo":
+      return { ...state, index: Math.max(0, state.index - 1) };
+    case "redo":
+      return { ...state, index: Math.min(state.stack.length - 1, state.index + 1) };
+    default:
+      return state;
+  }
 }
 
 function useScrollProgress(ref: React.RefObject<HTMLDivElement | null>) {
@@ -181,7 +212,26 @@ function ScrollBar({ scrollRef }: ScrollBarProps) {
 }
 
 export default function MarkdownViewer() {
-  const [content, setContent] = useState(SAMPLE_MARKDOWN);
+  const [history, dispatch] = useReducer(historyReducer, {
+    stack: [SAMPLE_MARKDOWN],
+    index: 0,
+  });
+  const content = history.stack[history.index];
+
+  // Debounce timer for pushing typing into history (every ~500 ms of inactivity)
+  const historyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const setContent = useCallback((value: string, immediate = false) => {
+    // Optimistically update the top of the stack so the textarea feels instant
+    dispatch({ type: "push", value });
+    if (!immediate) {
+      if (historyTimer.current) clearTimeout(historyTimer.current);
+      historyTimer.current = setTimeout(() => {
+        dispatch({ type: "push", value });
+      }, 500);
+    }
+  }, []);
+
   const [fileName, setFileName] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("preview");
   const [isDragging, setIsDragging] = useState(false);
@@ -283,7 +333,19 @@ export default function MarkdownViewer() {
       if (!ta) return;
       const ctrl = e.ctrlKey || e.metaKey;
 
-      if (ctrl && e.key === "b") {
+      if (ctrl && e.key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          dispatch({ type: "redo" });
+        } else {
+          dispatch({ type: "undo" });
+        }
+        return;
+      } else if (ctrl && e.key === "y") {
+        e.preventDefault();
+        dispatch({ type: "redo" });
+        return;
+      } else if (ctrl && e.key === "b") {
         e.preventDefault();
         applyWrapping(ta, "**", "**", "bold text", setContent);
       } else if (ctrl && e.key === "i") {
@@ -307,7 +369,7 @@ export default function MarkdownViewer() {
           value.slice(0, selectionStart) +
           "```\n" + selected + "\n```" +
           value.slice(selectionEnd);
-        setContent(newValue);
+        setContent(newValue, true);
         requestAnimationFrame(() => {
           ta.focus();
           ta.setSelectionRange(selectionStart + 4, selectionStart + 4 + selected.length);
@@ -335,7 +397,7 @@ export default function MarkdownViewer() {
         e.preventDefault();
         const { selectionStart, selectionEnd, value } = ta;
         const newValue = value.slice(0, selectionStart) + "  " + value.slice(selectionEnd);
-        setContent(newValue);
+        setContent(newValue, true);
         requestAnimationFrame(() => {
           ta.focus();
           ta.setSelectionRange(selectionStart + 2, selectionStart + 2);
