@@ -22,6 +22,7 @@ interface TabData {
   content: string;
   bookmark: number | null;
   scrollRatio: number;
+  color?: string | null;
 }
 
 function makeTab(overrides: Partial<TabData> = {}): TabData {
@@ -274,8 +275,88 @@ function ComparePane({ tabId, tabs, themeVars, accentColor, onChangeTab, onClose
   );
 }
 
+// ── Tab color palette ─────────────────────────────────────────────────────────
+const TAB_COLORS: (string | null)[] = [
+  null,       // default (uses theme accent)
+  "#ef4444",  // red
+  "#f97316",  // orange
+  "#f59e0b",  // amber
+  "#eab308",  // yellow
+  "#84cc16",  // lime
+  "#22c55e",  // green
+  "#14b8a6",  // teal
+  "#06b6d4",  // cyan
+  "#3b82f6",  // blue
+  "#6366f1",  // indigo
+  "#8b5cf6",  // violet
+  "#a855f7",  // purple
+  "#ec4899",  // pink
+  "#f43f5e",  // rose
+  "#64748b",  // slate
+];
+
+// ── Color context menu ────────────────────────────────────────────────────────
+function ColorMenu({ x, y, currentColor, accentColor, onSelect, onClose }: {
+  x: number; y: number;
+  currentColor: string | null | undefined;
+  accentColor: string;
+  onSelect: (color: string | null) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("mousedown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [onClose]);
+
+  // Keep menu on screen
+  const menuW = 192, menuH = 130;
+  const left = Math.min(x, window.innerWidth - menuW - 8);
+  const top  = Math.min(y, window.innerHeight - menuH - 8);
+
+  return (
+    <div ref={ref}
+      className="fixed z-[60] bg-white border border-slate-200 rounded-xl shadow-xl p-3"
+      style={{ left, top, width: menuW }}
+    >
+      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-2">Tab color</p>
+      <div className="grid grid-cols-8 gap-1.5">
+        {TAB_COLORS.map((color, i) => (
+          <button
+            key={i}
+            onClick={() => { onSelect(color); onClose(); }}
+            title={color ?? "Default"}
+            className={`w-5 h-5 rounded-full border-2 transition-transform hover:scale-110 ${
+              (color ?? accentColor) === (currentColor ?? accentColor) && currentColor === color
+                ? "border-slate-600 scale-110"
+                : "border-transparent hover:border-slate-300"
+            }`}
+            style={{
+              background: color ?? "linear-gradient(135deg,#e2e8f0 50%,#cbd5e1 50%)",
+              ...(color === null ? { border: "2px dashed #cbd5e1", background: "white" } : {}),
+            }}
+          >
+            {color === null && (
+              <span className="flex items-center justify-center w-full h-full text-slate-400">
+                <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                  <path d="M1 1l6 6M7 1L1 7" />
+                </svg>
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Tab bar ───────────────────────────────────────────────────────────────────
-function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRename }: {
+function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRename, onReorder, onColorChange }: {
   tabs: TabData[];
   activeId: string;
   accentColor: string;
@@ -283,9 +364,14 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
   onClose: (id: string) => void;
   onNew: () => void;
   onRename: (id: string, label: string) => void;
+  onReorder: (fromId: string, toId: string) => void;
+  onColorChange: (id: string, color: string | null) => void;
 }) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const [colorMenu, setColorMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
+  const dragIdRef = useRef<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -307,51 +393,105 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
   }, [activeId]);
 
   return (
-    <div className="flex items-end bg-slate-100 border-b border-slate-200 px-2 flex-shrink-0">
-      <div ref={containerRef} className="flex items-end overflow-x-auto flex-1 gap-0.5 pt-1.5" style={{ scrollbarWidth: "none" }}>
-        {tabs.map(tab => {
-          const isActive = tab.id === activeId;
-          return (
-            <div key={tab.id} data-tabid={tab.id}
-              className={`group relative flex items-center gap-1.5 px-3 py-2 rounded-t-lg cursor-pointer flex-shrink-0 max-w-[180px] min-w-[80px] transition-all select-none ${
-                isActive ? "bg-white border border-b-0 border-slate-200 shadow-sm z-10" : "bg-slate-100 hover:bg-slate-50 border border-transparent"
-              }`}
-              style={isActive ? { borderBottomColor: "white" } : {}}
-              onClick={() => !editingId && onSwitch(tab.id)}
-              onDoubleClick={() => startEdit(tab)}
-            >
-              {isActive && <span className="absolute top-0 left-3 right-3 h-0.5 rounded-b" style={{ background: accentColor }} />}
-              <span className="w-2 h-2 rounded-full flex-shrink-0 opacity-70" style={{ background: isActive ? accentColor : "#94a3b8" }} />
-              {editingId === tab.id ? (
-                <input ref={inputRef} value={editValue} onChange={e => setEditValue(e.target.value)}
-                  onBlur={commitEdit}
-                  onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingId(null); e.stopPropagation(); }}
-                  className="flex-1 min-w-0 text-xs outline-none bg-transparent border-b border-slate-400 text-slate-800"
-                  onClick={e => e.stopPropagation()} />
-              ) : (
-                <span className={`flex-1 min-w-0 truncate text-xs ${isActive ? "text-slate-800 font-medium" : "text-slate-500"}`}>{tab.label}</span>
-              )}
-              {tabs.length > 1 && (
-                <button onClick={e => { e.stopPropagation(); onClose(tab.id); }}
-                  className={`flex-shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors ${
-                    isActive ? "text-slate-400 hover:text-red-500 hover:bg-red-50" : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 hover:bg-red-50"
-                  }`}>
-                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                    <path d="M1 1l6 6M7 1L1 7" />
-                  </svg>
-                </button>
-              )}
-            </div>
-          );
-        })}
+    <>
+      <div className="flex items-end bg-slate-100 border-b border-slate-200 px-2 flex-shrink-0">
+        <div ref={containerRef} className="flex items-end overflow-x-auto flex-1 gap-0.5 pt-1.5" style={{ scrollbarWidth: "none" }}>
+          {tabs.map(tab => {
+            const isActive = tab.id === activeId;
+            const tabColor = tab.color ?? accentColor;
+            const isDragOver = dragOverId === tab.id && dragIdRef.current !== tab.id;
+
+            return (
+              <div key={tab.id} data-tabid={tab.id}
+                draggable
+                onDragStart={e => {
+                  dragIdRef.current = tab.id;
+                  e.dataTransfer.effectAllowed = "move";
+                  e.dataTransfer.setData("application/md-tab-id", tab.id);
+                  // Slight delay so the drag ghost renders before we change opacity
+                  requestAnimationFrame(() => { (e.target as HTMLElement).style.opacity = "0.4"; });
+                }}
+                onDragEnd={e => {
+                  (e.target as HTMLElement).style.opacity = "";
+                  dragIdRef.current = null;
+                  setDragOverId(null);
+                }}
+                onDragOver={e => {
+                  e.preventDefault();
+                  e.stopPropagation();  // prevent file-drop overlay
+                  e.dataTransfer.dropEffect = "move";
+                  if (dragIdRef.current && dragIdRef.current !== tab.id) setDragOverId(tab.id);
+                }}
+                onDragLeave={() => setDragOverId(null)}
+                onDrop={e => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const fromId = e.dataTransfer.getData("application/md-tab-id");
+                  if (fromId && fromId !== tab.id) onReorder(fromId, tab.id);
+                  setDragOverId(null);
+                }}
+                onContextMenu={e => {
+                  e.preventDefault();
+                  setColorMenu({ tabId: tab.id, x: e.clientX, y: e.clientY });
+                }}
+                className={`group relative flex items-center gap-1.5 px-3 py-2 rounded-t-lg cursor-pointer flex-shrink-0 max-w-[180px] min-w-[80px] transition-all select-none ${
+                  isActive ? "bg-white border border-b-0 border-slate-200 shadow-sm z-10" : "bg-slate-100 hover:bg-slate-50 border border-transparent"
+                } ${isDragOver ? "border-l-2 !border-l-blue-400" : ""}`}
+                style={isActive ? { borderBottomColor: "white" } : {}}
+                onClick={() => !editingId && onSwitch(tab.id)}
+                onDoubleClick={() => startEdit(tab)}
+              >
+                {/* Colored top stripe */}
+                <span className="absolute top-0 left-2 right-2 h-0.5 rounded-b transition-opacity"
+                  style={{ background: tabColor, opacity: isActive ? 1 : 0.35 }} />
+
+                {/* Colored dot */}
+                <span className="w-2 h-2 rounded-full flex-shrink-0 transition-opacity"
+                  style={{ background: tabColor, opacity: isActive ? 1 : 0.6 }} />
+
+                {editingId === tab.id ? (
+                  <input ref={inputRef} value={editValue} onChange={e => setEditValue(e.target.value)}
+                    onBlur={commitEdit}
+                    onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingId(null); e.stopPropagation(); }}
+                    className="flex-1 min-w-0 text-xs outline-none bg-transparent border-b border-slate-400 text-slate-800"
+                    onClick={e => e.stopPropagation()} />
+                ) : (
+                  <span className={`flex-1 min-w-0 truncate text-xs ${isActive ? "text-slate-800 font-medium" : "text-slate-500"}`}>{tab.label}</span>
+                )}
+
+                {tabs.length > 1 && (
+                  <button onClick={e => { e.stopPropagation(); onClose(tab.id); }}
+                    className={`flex-shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors ${
+                      isActive ? "text-slate-400 hover:text-red-500 hover:bg-red-50" : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 hover:bg-red-50"
+                    }`}>
+                    <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                      <path d="M1 1l6 6M7 1L1 7" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={onNew} title="New tab"
+          className="flex-shrink-0 w-7 h-7 mb-1 ml-1 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+            <path d="M6 2v8M2 6h8" />
+          </svg>
+        </button>
       </div>
-      <button onClick={onNew} title="New tab"
-        className="flex-shrink-0 w-7 h-7 mb-1 ml-1 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors">
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-          <path d="M6 2v8M2 6h8" />
-        </svg>
-      </button>
-    </div>
+
+      {/* Color picker context menu — portal-like, rendered outside the tab bar */}
+      {colorMenu && (
+        <ColorMenu
+          x={colorMenu.x} y={colorMenu.y}
+          currentColor={tabs.find(t => t.id === colorMenu.tabId)?.color}
+          accentColor={accentColor}
+          onSelect={color => onColorChange(colorMenu.tabId, color)}
+          onClose={() => setColorMenu(null)}
+        />
+      )}
+    </>
   );
 }
 
@@ -670,6 +810,22 @@ export default function MarkdownViewer() {
     setTabs(prev => prev.map(t => t.id === id ? { ...t, label } : t));
   }, []);
 
+  const reorderTabs = useCallback((fromId: string, toId: string) => {
+    setTabs(prev => {
+      const fromIdx = prev.findIndex(t => t.id === fromId);
+      const toIdx = prev.findIndex(t => t.id === toId);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  }, []);
+
+  const changeTabColor = useCallback((id: string, color: string | null) => {
+    setTabs(prev => prev.map(t => t.id === id ? { ...t, color } : t));
+  }, []);
+
   const saveBookmark = useCallback((ratio: number) => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, bookmark: ratio } : t));
   }, [activeTabId]);
@@ -750,7 +906,10 @@ export default function MarkdownViewer() {
   }, [loadFile]);
 
   // ── Drag & drop ───────────────────────────────────────────────────────────
-  const handleDragOver = useCallback((e: React.DragEvent) => { e.preventDefault(); setIsDragging(true); }, []);
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault(); setIsDragging(true);
+  }, []);
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDragging(false);
   }, []);
@@ -890,7 +1049,8 @@ export default function MarkdownViewer() {
         </div>
 
         <TabBar tabs={tabs} activeId={activeTabId} accentColor={activeTheme.accentColor}
-          onSwitch={switchTab} onClose={closeTab} onNew={newTab} onRename={renameTab} />
+          onSwitch={switchTab} onClose={closeTab} onNew={newTab} onRename={renameTab}
+          onReorder={reorderTabs} onColorChange={changeTabColor} />
       </header>
 
       {/* Main */}
