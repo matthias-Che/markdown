@@ -14,13 +14,33 @@ import { generateThemeFromPrompt } from "@/lib/generateTheme";
 
 type ViewMode = "preview" | "split";
 
-// ── LocalStorage keys ────────────────────────────────────────────────────────
-const LS_CONTENT   = "md-content";
-const LS_FILENAME  = "md-filename";
-const LS_VIEW_MODE = "md-view-mode";
-const LS_THEME     = "md-theme";
-const LS_SCROLL    = "md-scroll-ratio";
-const LS_BOOKMARK  = "md-viewer-bookmark";
+// ── Tab data ──────────────────────────────────────────────────────────────────
+interface TabData {
+  id: string;
+  label: string;
+  fileName: string | null;
+  content: string;
+  bookmark: number | null;  // scroll ratio, unique per tab
+  scrollRatio: number;
+}
+
+function makeTab(overrides: Partial<TabData> = {}): TabData {
+  return {
+    id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    label: "Untitled",
+    fileName: null,
+    content: SAMPLE_MARKDOWN,
+    bookmark: null,      // no bookmark on new/uploaded tab
+    scrollRatio: 0,
+    ...overrides,
+  };
+}
+
+// ── LocalStorage keys ─────────────────────────────────────────────────────────
+const LS_TABS       = "md-tabs";
+const LS_ACTIVE_TAB = "md-active-tab";
+const LS_VIEW_MODE  = "md-view-mode";
+const LS_THEME      = "md-theme";
 
 function lsGet(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -29,61 +49,28 @@ function lsSet(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch {}
 }
 
-// ── Markdown renderer ────────────────────────────────────────────────────────
-function MarkdownRenderer({ content, themeVars }: { content: string; themeVars: CSSProperties }) {
-  return (
-    <div className="markdown-body max-w-none" style={themeVars}>
-      <ReactMarkdown
-        remarkPlugins={[remarkMath, remarkGfm]}
-        rehypePlugins={[rehypeKatex, rehypeHighlight]}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
+function loadTabs(): TabData[] {
+  try {
+    const raw = lsGet(LS_TABS);
+    if (raw) {
+      const parsed = JSON.parse(raw) as TabData[];
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch {}
+  return [makeTab({ label: "Welcome" })];
 }
 
-// ── Editor helpers ───────────────────────────────────────────────────────────
-type SetContent = (v: string, immediate?: boolean) => void;
-
-function applyWrapping(
-  ta: HTMLTextAreaElement, before: string, after: string,
-  placeholder: string, onChange: SetContent,
-) {
-  const { selectionStart: s, selectionEnd: e, value } = ta;
-  const selected = value.slice(s, e) || placeholder;
-  const next = value.slice(0, s) + before + selected + after + value.slice(e);
-  onChange(next, true);
-  requestAnimationFrame(() => {
-    ta.focus();
-    ta.setSelectionRange(s + before.length, s + before.length + selected.length);
-  });
-}
-
-function applyLinePrefix(
-  ta: HTMLTextAreaElement, prefix: string, onChange: SetContent,
-) {
-  const { selectionStart, value } = ta;
-  const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
-  const lineEnd = value.indexOf("\n", selectionStart);
-  const end = lineEnd === -1 ? value.length : lineEnd;
-  const line = value.slice(lineStart, end);
-  const has = line.startsWith(prefix);
-  const next = value.slice(0, lineStart) + (has ? line.slice(prefix.length) : prefix + line) + value.slice(end);
-  const offset = has ? -prefix.length : prefix.length;
-  onChange(next, true);
-  requestAnimationFrame(() => {
-    ta.focus();
-    ta.setSelectionRange(selectionStart + offset, selectionStart + offset);
-  });
-}
-
-// ── History reducer ──────────────────────────────────────────────────────────
+// ── History reducer ───────────────────────────────────────────────────────────
 interface HistoryState { stack: string[]; index: number; }
-type HistoryAction = { type: "push"; value: string } | { type: "undo" } | { type: "redo" };
+type HistoryAction =
+  | { type: "push"; value: string }
+  | { type: "undo" }
+  | { type: "redo" }
+  | { type: "init"; state: HistoryState };
 
 function historyReducer(s: HistoryState, a: HistoryAction): HistoryState {
   switch (a.type) {
+    case "init": return a.state;
     case "push": {
       if (s.stack[s.index] === a.value) return s;
       const next = s.stack.slice(0, s.index + 1);
@@ -96,51 +83,79 @@ function historyReducer(s: HistoryState, a: HistoryAction): HistoryState {
   }
 }
 
-// ── Scroll progress hook ─────────────────────────────────────────────────────
+// ── Markdown renderer ─────────────────────────────────────────────────────────
+function MarkdownRenderer({ content, themeVars }: { content: string; themeVars: CSSProperties }) {
+  return (
+    <div className="markdown-body max-w-none" style={themeVars}>
+      <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex, rehypeHighlight]}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+// ── Editor helpers ────────────────────────────────────────────────────────────
+type SetContent = (v: string, immediate?: boolean) => void;
+
+function applyWrapping(ta: HTMLTextAreaElement, before: string, after: string, placeholder: string, onChange: SetContent) {
+  const { selectionStart: s, selectionEnd: e, value } = ta;
+  const selected = value.slice(s, e) || placeholder;
+  onChange(value.slice(0, s) + before + selected + after + value.slice(e), true);
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(s + before.length, s + before.length + selected.length); });
+}
+
+function applyLinePrefix(ta: HTMLTextAreaElement, prefix: string, onChange: SetContent) {
+  const { selectionStart, value } = ta;
+  const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
+  const lineEnd = value.indexOf("\n", selectionStart);
+  const end = lineEnd === -1 ? value.length : lineEnd;
+  const line = value.slice(lineStart, end);
+  const has = line.startsWith(prefix);
+  const offset = has ? -prefix.length : prefix.length;
+  onChange(value.slice(0, lineStart) + (has ? line.slice(prefix.length) : prefix + line) + value.slice(end), true);
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(selectionStart + offset, selectionStart + offset); });
+}
+
+// ── Scroll progress hook ──────────────────────────────────────────────────────
 function useScrollProgress(ref: React.RefObject<HTMLDivElement | null>) {
   const [progress, setProgress] = useState(0);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const onScroll = () => {
+    const fn = () => {
       const max = el.scrollHeight - el.clientHeight;
       setProgress(max > 0 ? el.scrollTop / max : 0);
     };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    el.addEventListener("scroll", fn, { passive: true });
+    return () => el.removeEventListener("scroll", fn);
   }, [ref]);
   return progress;
 }
 
-// ── Scroll bar + bookmark ─────────────────────────────────────────────────────
-function ScrollBar({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement | null> }) {
+// ── Scroll bar + bookmark (props-driven, no internal LS) ──────────────────────
+function ScrollBar({ scrollRef, bookmark, onSaveBookmark }: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  bookmark: number | null;
+  onSaveBookmark: (ratio: number) => void;
+}) {
   const progress = useScrollProgress(scrollRef);
-  const [bookmark, setBookmark] = useState<number | null>(null);
   const [showToast, setShowToast] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    const saved = lsGet(LS_BOOKMARK);
-    if (saved !== null) setBookmark(parseFloat(saved));
-  }, []);
 
   const saveBookmark = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const max = el.scrollHeight - el.clientHeight;
-    const pos = max > 0 ? el.scrollTop / max : 0;
-    setBookmark(pos);
-    lsSet(LS_BOOKMARK, String(pos));
+    onSaveBookmark(max > 0 ? el.scrollTop / max : 0);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     setShowToast(true);
     toastTimer.current = setTimeout(() => setShowToast(false), 2000);
-  }, [scrollRef]);
+  }, [scrollRef, onSaveBookmark]);
 
   const jumpToBookmark = useCallback(() => {
     const el = scrollRef.current;
     if (!el || bookmark === null) return;
-    const max = el.scrollHeight - el.clientHeight;
-    el.scrollTo({ top: bookmark * max, behavior: "smooth" });
+    el.scrollTo({ top: bookmark * (el.scrollHeight - el.clientHeight), behavior: "smooth" });
   }, [scrollRef, bookmark]);
 
   const pct = Math.round(progress * 100);
@@ -148,7 +163,7 @@ function ScrollBar({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement | 
 
   return (
     <div className="fixed right-4 top-1/2 -translate-y-1/2 z-30 flex flex-col items-center gap-2 select-none">
-      <div className={`absolute -left-32 bg-green-700 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg transition-all duration-200 whitespace-nowrap ${showToast ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
+      <div className={`absolute -left-32 bg-slate-800 text-white text-xs px-3 py-1.5 rounded-lg shadow-lg transition-all duration-200 whitespace-nowrap ${showToast ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
         Bookmark saved
       </div>
       <div className="relative w-1.5 h-48 bg-slate-200 rounded-full overflow-visible">
@@ -178,19 +193,133 @@ function ScrollBar({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement | 
   );
 }
 
+// ── Tab bar ───────────────────────────────────────────────────────────────────
+function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRename }: {
+  tabs: TabData[];
+  activeId: string;
+  accentColor: string;
+  onSwitch: (id: string) => void;
+  onClose: (id: string) => void;
+  onNew: () => void;
+  onRename: (id: string, label: string) => void;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const startEdit = (tab: TabData) => {
+    setEditingId(tab.id);
+    setEditValue(tab.label);
+    setTimeout(() => inputRef.current?.select(), 30);
+  };
+
+  const commitEdit = () => {
+    if (editingId) {
+      onRename(editingId, editValue.trim() || "Untitled");
+      setEditingId(null);
+    }
+  };
+
+  // Scroll active tab into view
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const activeEl = container.querySelector(`[data-tabid="${activeId}"]`) as HTMLElement | null;
+    if (activeEl) activeEl.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [activeId]);
+
+  return (
+    <div className="flex items-end bg-slate-100 border-b border-slate-200 px-2 flex-shrink-0 overflow-hidden">
+      {/* Scrollable tab list */}
+      <div ref={scrollRef} className="flex items-end overflow-x-auto flex-1 scrollbar-none gap-0.5 pt-1.5">
+        {tabs.map((tab) => {
+          const isActive = tab.id === activeId;
+          return (
+            <div
+              key={tab.id}
+              data-tabid={tab.id}
+              className={`group relative flex items-center gap-1.5 px-3 py-2 rounded-t-lg cursor-pointer flex-shrink-0 max-w-[180px] min-w-[80px] transition-all select-none ${
+                isActive
+                  ? "bg-white border border-b-0 border-slate-200 shadow-sm z-10"
+                  : "bg-slate-100 hover:bg-slate-50 border border-transparent"
+              }`}
+              style={isActive ? { borderBottomColor: "white" } : {}}
+              onClick={() => !editingId && onSwitch(tab.id)}
+              onDoubleClick={() => startEdit(tab)}
+            >
+              {/* Active indicator stripe */}
+              {isActive && (
+                <span className="absolute top-0 left-3 right-3 h-0.5 rounded-b" style={{ background: accentColor }} />
+              )}
+
+              {/* File dot */}
+              <span className="w-2 h-2 rounded-full flex-shrink-0 opacity-70"
+                style={{ background: isActive ? accentColor : "#94a3b8" }} />
+
+              {/* Label / edit input */}
+              {editingId === tab.id ? (
+                <input
+                  ref={inputRef}
+                  value={editValue}
+                  onChange={e => setEditValue(e.target.value)}
+                  onBlur={commitEdit}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") commitEdit();
+                    if (e.key === "Escape") setEditingId(null);
+                    e.stopPropagation();
+                  }}
+                  className="flex-1 min-w-0 text-xs outline-none bg-transparent border-b border-slate-400 text-slate-800"
+                  onClick={e => e.stopPropagation()}
+                />
+              ) : (
+                <span className={`flex-1 min-w-0 truncate text-xs ${isActive ? "text-slate-800 font-medium" : "text-slate-500"}`}>
+                  {tab.label}
+                </span>
+              )}
+
+              {/* Close button */}
+              {tabs.length > 1 && (
+                <button
+                  onClick={e => { e.stopPropagation(); onClose(tab.id); }}
+                  className={`flex-shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors ${
+                    isActive
+                      ? "text-slate-400 hover:text-red-500 hover:bg-red-50"
+                      : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 hover:bg-red-50"
+                  }`}
+                >
+                  <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <path d="M1 1l6 6M7 1L1 7" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* New tab button */}
+      <button
+        onClick={onNew}
+        title="New tab"
+        className="flex-shrink-0 w-7 h-7 mb-1 ml-1 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors"
+      >
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+          <path d="M6 2v8M2 6h8" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 // ── Theme card ────────────────────────────────────────────────────────────────
 function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; onClick: () => void }) {
   return (
-    <button
-      onClick={onClick}
-      title={theme.name}
+    <button onClick={onClick} title={theme.name}
       className={`group relative flex flex-col rounded-xl overflow-hidden border-2 transition-all duration-150 text-left ${
-        active
-          ? "border-slate-400 shadow-md scale-[1.03]"
-          : "border-transparent hover:border-slate-200 hover:shadow-sm"
+        active ? "border-slate-400 shadow-md scale-[1.03]" : "border-transparent hover:border-slate-200 hover:shadow-sm"
       }`}
     >
-      {/* Color bar: gradient of the three palette colors */}
       <div className="h-9 w-full flex">
         <span className="flex-1" style={{ background: theme.h1Color }} />
         <span className="flex-1" style={{ background: theme.accentColor }} />
@@ -198,14 +327,10 @@ function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; 
         <span className="flex-[0.4]" style={{ background: theme.codeFg }} />
         <span className="flex-[0.6]" style={{ background: theme.codeBg }} />
       </div>
-      {/* Mini preview text on tinted bg */}
       <div className="px-2 py-1.5 flex flex-col gap-0.5" style={{ background: theme.bgTint }}>
-        <span className="text-[10px] font-bold leading-none truncate" style={{ color: theme.h1Color }}>
-          {theme.name}
-        </span>
+        <span className="text-[10px] font-bold leading-none truncate" style={{ color: theme.h1Color }}>{theme.name}</span>
         <span className="text-[8px] leading-none" style={{ color: theme.accentColor }}>Aa</span>
       </div>
-      {/* Active check */}
       {active && (
         <span className="absolute top-1 right-1 w-4 h-4 bg-white rounded-full flex items-center justify-center shadow">
           <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
@@ -217,7 +342,7 @@ function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; 
   );
 }
 
-// ── Theme picker panel ────────────────────────────────────────────────────────
+// ── Theme picker ──────────────────────────────────────────────────────────────
 function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   activeId: string;
   onSelect: (id: string) => void;
@@ -232,169 +357,94 @@ function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   const ref = useRef<HTMLDivElement>(null);
 
   const topThemes = TOP_THEME_IDS.map(id => themeMap[id]).filter(Boolean);
-  const allThemes = themes;
-  const filteredAll = search.trim()
-    ? allThemes.filter(t => t.name.toLowerCase().includes(search.toLowerCase()))
-    : allThemes;
-  const displayThemes = expanded ? filteredAll : (search.trim() ? filteredAll : topThemes);
+  const filteredAll = search.trim() ? themes.filter(t => t.name.toLowerCase().includes(search.toLowerCase())) : themes;
+  const displayThemes = expanded || search.trim() ? filteredAll : topThemes;
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
-    };
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
-  // Live preview while typing prompt
   useEffect(() => {
     if (!prompt.trim()) { setPreviewTheme(null); return; }
     const t = setTimeout(() => setPreviewTheme(generateThemeFromPrompt(prompt)), 300);
     return () => clearTimeout(t);
   }, [prompt]);
 
-  const applyGenerated = () => {
-    if (!previewTheme) return;
-    onGenerated(previewTheme);
-    onClose();
-  };
-
   const examples = ["ice", "sunset", "forest", "candy", "galaxy", "coffee", "neon", "desert"];
 
   return (
-    <div
-      ref={ref}
-      className="absolute right-0 top-full mt-2 bg-white border border-slate-200 rounded-2xl shadow-2xl z-50 overflow-hidden"
-      style={{ width: "480px" }}
-    >
-      {/* Header tabs */}
+    <div ref={ref} className="absolute right-0 top-full mt-2 bg-white border border-slate-200 rounded-2xl shadow-2xl z-50 overflow-hidden" style={{ width: "480px" }}>
       <div className="flex items-center gap-0 border-b border-slate-100 px-4 pt-3">
-        <button
-          onClick={() => setTab("browse")}
-          className={`pb-2.5 px-1 mr-4 text-xs font-semibold border-b-2 transition-colors ${
-            tab === "browse" ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"
-          }`}
-        >
-          Browse themes
-        </button>
-        <button
-          onClick={() => setTab("generate")}
-          className={`pb-2.5 px-1 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
-            tab === "generate" ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"
-          }`}
-        >
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <path d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.5 1.5M8 8l1.5 1.5M2.5 9.5L4 8M8 4l1.5-1.5" />
-          </svg>
-          Generate
-        </button>
+        {(["browse", "generate"] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`pb-2.5 px-1 mr-4 text-xs font-semibold border-b-2 transition-colors capitalize ${tab === t ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"}`}>
+            {t === "generate" ? "✦ Generate" : "Browse themes"}
+          </button>
+        ))}
       </div>
 
       {tab === "browse" ? (
         <div className="p-4">
-          {/* Search */}
           <div className="relative mb-3">
             <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
               <circle cx="5" cy="5" r="3.5" /><path d="M8 8l2.5 2.5" />
             </svg>
-            <input
-              value={search}
-              onChange={e => { setSearch(e.target.value); if (e.target.value) setExpanded(true); }}
+            <input value={search} onChange={e => { setSearch(e.target.value); if (e.target.value) setExpanded(true); }}
               placeholder="Search themes…"
-              className="w-full pl-7 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400"
-            />
+              className="w-full pl-7 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400" />
           </div>
-
-          {/* Section label */}
           <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
             {search.trim() ? `${filteredAll.length} result${filteredAll.length !== 1 ? "s" : ""}` : expanded ? "All themes" : "Featured"}
           </p>
-
-          {/* Grid */}
           <div className="grid grid-cols-5 gap-2">
-            {displayThemes.map(t => (
-              <ThemeCard key={t.id} theme={t} active={activeId === t.id} onClick={() => onSelect(t.id)} />
-            ))}
+            {displayThemes.map(t => <ThemeCard key={t.id} theme={t} active={activeId === t.id} onClick={() => onSelect(t.id)} />)}
           </div>
-
-          {/* Expand / collapse */}
           {!search.trim() && (
-            <button
-              onClick={() => setExpanded(v => !v)}
-              className="mt-3 w-full py-2 text-xs text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-50 border border-dashed border-slate-200 transition-colors font-medium"
-            >
-              {expanded ? "Show less ▴" : `See all themes (${allThemes.length}) ▾`}
+            <button onClick={() => setExpanded(v => !v)}
+              className="mt-3 w-full py-2 text-xs text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-50 border border-dashed border-slate-200 transition-colors font-medium">
+              {expanded ? "Show less ▴" : `See all themes (${themes.length}) ▾`}
             </button>
           )}
         </div>
       ) : (
         <div className="p-4">
-          <p className="text-xs text-slate-500 mb-3 leading-relaxed">
-            Describe a vibe, mood, or concept — we'll generate a matching color palette for you.
-          </p>
-
-          {/* Prompt input */}
+          <p className="text-xs text-slate-500 mb-3 leading-relaxed">Describe a vibe, mood, or concept — we'll generate a matching color palette.</p>
           <div className="flex gap-2 mb-3">
-            <input
-              value={prompt}
-              onChange={e => setPrompt(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter") applyGenerated(); }}
+            <input value={prompt} onChange={e => setPrompt(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && previewTheme) { onGenerated(previewTheme); onClose(); } }}
               placeholder='e.g. "ice", "midnight forest", "warm coffee"'
-              className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400"
-              autoFocus
-            />
-            <button
-              onClick={applyGenerated}
-              disabled={!previewTheme}
+              className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400" autoFocus />
+            <button onClick={() => { if (previewTheme) { onGenerated(previewTheme); onClose(); } }} disabled={!previewTheme}
               className="px-4 py-2 text-xs font-semibold text-white rounded-lg transition-colors disabled:opacity-40"
-              style={{ background: previewTheme?.accentColor ?? "#64748b" }}
-            >
-              Apply
-            </button>
+              style={{ background: previewTheme?.accentColor ?? "#64748b" }}>Apply</button>
           </div>
-
-          {/* Examples */}
           <div className="flex flex-wrap gap-1.5 mb-4">
             {examples.map(ex => (
               <button key={ex} onClick={() => setPrompt(ex)}
-                className="px-2.5 py-1 text-[10px] rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors font-medium">
-                {ex}
-              </button>
+                className="px-2.5 py-1 text-[10px] rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors font-medium">{ex}</button>
             ))}
           </div>
-
-          {/* Live preview */}
-          {previewTheme && (
+          {previewTheme ? (
             <div className="rounded-xl overflow-hidden border border-slate-200 shadow-sm">
-              {/* Palette strip */}
               <div className="h-8 flex">
                 {[previewTheme.h1Color, previewTheme.accentColor, previewTheme.borderLight, previewTheme.bgTint, previewTheme.codeFg, previewTheme.codeBg].map((c, i) => (
                   <span key={i} className="flex-1" style={{ background: c }} />
                 ))}
               </div>
-              {/* Preview content */}
               <div className="px-4 py-3" style={{ background: previewTheme.pageBg ?? "#f8fafc" }}>
-                <p className="text-sm font-bold mb-1" style={{ color: previewTheme.h1Color }}>
-                  {previewTheme.name}
-                </p>
-                <p className="text-xs mb-1" style={{ color: previewTheme.accentColor }}>
-                  Heading accent · Link color · Bullets
-                </p>
+                <p className="text-sm font-bold mb-1" style={{ color: previewTheme.h1Color }}>{previewTheme.name}</p>
+                <p className="text-xs mb-1" style={{ color: previewTheme.accentColor }}>Heading · Link · Bullets</p>
                 <p className="text-xs">
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono" style={{ background: previewTheme.codeBg, color: previewTheme.codeFg, border: `1px solid ${previewTheme.codeBorder}` }}>
-                    inline code
-                  </span>
-                  {" "}and{" "}
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono" style={{ background: previewTheme.codeBg, color: previewTheme.codeFg, border: `1px solid ${previewTheme.codeBorder}` }}>inline code</span>
+                  {" and "}
                   <span style={{ color: previewTheme.accentColor, textDecoration: "underline", fontSize: "11px" }}>links</span>
                 </p>
               </div>
             </div>
-          )}
-
-          {!previewTheme && (
-            <div className="rounded-xl border border-dashed border-slate-200 py-8 text-center text-xs text-slate-400">
-              Type above to preview your generated theme
-            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-slate-200 py-8 text-center text-xs text-slate-400">Type above to preview your generated theme</div>
           )}
         </div>
       )}
@@ -402,29 +452,41 @@ function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   );
 }
 
-// ── Build CSS variable object from a Theme ────────────────────────────────────
+// ── CSS vars from theme ───────────────────────────────────────────────────────
 function themeToVars(t: Theme): CSSProperties {
   return {
-    "--md-h1": t.h1Color,
-    "--md-accent": t.accentColor,
-    "--md-border-light": t.borderLight,
-    "--md-border-lighter": t.borderLighter,
-    "--md-bg-tint": t.bgTint,
-    "--md-code-fg": t.codeFg,
-    "--md-code-bg": t.codeBg,
-    "--md-code-border": t.codeBorder,
+    "--md-h1": t.h1Color, "--md-accent": t.accentColor,
+    "--md-border-light": t.borderLight, "--md-border-lighter": t.borderLighter,
+    "--md-bg-tint": t.bgTint, "--md-code-fg": t.codeFg,
+    "--md-code-bg": t.codeBg, "--md-code-border": t.codeBorder,
   } as CSSProperties;
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
 export default function MarkdownViewer() {
-  // ── State ─────────────────────────────────────────────────────────────────
-  const initialContent = (() => { try { return lsGet(LS_CONTENT) ?? SAMPLE_MARKDOWN; } catch { return SAMPLE_MARKDOWN; } })();
+  // ── Tabs ──────────────────────────────────────────────────────────────────
+  const [tabs, setTabs] = useState<TabData[]>(() => loadTabs());
+  const [activeTabId, setActiveTabId] = useState<string>(() => {
+    const saved = lsGet(LS_ACTIVE_TAB);
+    const loaded = loadTabs();
+    return saved && loaded.find(t => t.id === saved) ? saved : loaded[0].id;
+  });
 
-  const [history, dispatch] = useReducer(historyReducer, { stack: [initialContent], index: 0 });
+  const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
+
+  // ── History (active tab only; inactive tabs stored in historyMapRef) ───────
+  const historyMapRef = useRef<Map<string, HistoryState>>(new Map());
+  const historyRef = useRef<HistoryState>({ stack: [activeTab.content], index: 0 });
+
+  const [history, dispatch] = useReducer(historyReducer, {
+    stack: [activeTab.content], index: 0,
+  });
   const content = history.stack[history.index];
-  const historyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Keep historyRef in sync so tab switches can read current state
+  useEffect(() => { historyRef.current = history; }, [history]);
+
+  const historyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setContent = useCallback((value: string, immediate = false) => {
     dispatch({ type: "push", value });
     if (!immediate) {
@@ -433,7 +495,7 @@ export default function MarkdownViewer() {
     }
   }, []);
 
-  const [fileName, setFileName] = useState<string | null>(() => lsGet(LS_FILENAME));
+  // ── Other state ───────────────────────────────────────────────────────────
   const [viewMode, setViewMode] = useState<ViewMode>(() => (lsGet(LS_VIEW_MODE) as ViewMode) ?? "preview");
   const [themeId, setThemeId] = useState<string>(() => lsGet(LS_THEME) ?? "forest");
   const [customTheme, setCustomTheme] = useState<Theme | null>(null);
@@ -448,50 +510,118 @@ export default function MarkdownViewer() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
   const splitPreviewScrollRef = useRef<HTMLDivElement>(null);
-
-  // ── Persist content to localStorage (debounced) ───────────────────────────
-  useEffect(() => {
-    const t = setTimeout(() => lsSet(LS_CONTENT, content), 500);
-    return () => clearTimeout(t);
-  }, [content]);
-
-  // ── Persist scroll ratio ──────────────────────────────────────────────────
   const activeScrollRef = viewMode === "preview" ? previewScrollRef : splitPreviewScrollRef;
 
+  // ── Sync active tab content → tabs array (for persistence) ────────────────
   useEffect(() => {
-    const el = activeScrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      const max = el.scrollHeight - el.clientHeight;
-      if (max > 0) lsSet(LS_SCROLL, String(el.scrollTop / max));
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, [activeScrollRef, viewMode]);
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content } : t));
+  }, [content, activeTabId]);
 
-  // ── Restore scroll position on first mount (after render) ────────────────
-  const scrollRestored = useRef(false);
+  // ── Persist everything ────────────────────────────────────────────────────
   useEffect(() => {
-    if (scrollRestored.current) return;
-    const ratio = parseFloat(lsGet(LS_SCROLL) ?? "0");
-    if (!ratio) return;
+    const timer = setTimeout(() => lsSet(LS_TABS, JSON.stringify(tabs)), 600);
+    return () => clearTimeout(timer);
+  }, [tabs]);
+  useEffect(() => { lsSet(LS_ACTIVE_TAB, activeTabId); }, [activeTabId]);
+  useEffect(() => { lsSet(LS_VIEW_MODE, viewMode); }, [viewMode]);
+  useEffect(() => { lsSet(LS_THEME, themeId); }, [themeId]);
+
+  // ── Save scroll ratio to active tab ───────────────────────────────────────
+  useEffect(() => {
     const el = activeScrollRef.current;
     if (!el) return;
-    // Wait for layout to settle
-    const t = setTimeout(() => {
+    const fn = () => {
       const max = el.scrollHeight - el.clientHeight;
-      el.scrollTop = ratio * max;
-      scrollRestored.current = true;
+      if (max > 0) {
+        setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, scrollRatio: el.scrollTop / max } : t));
+      }
+    };
+    el.addEventListener("scroll", fn, { passive: true });
+    return () => el.removeEventListener("scroll", fn);
+  }, [activeScrollRef, activeTabId, viewMode]);
+
+  // ── Restore scroll on tab switch ──────────────────────────────────────────
+  const pendingScrollRatio = useRef<number | null>(null);
+  useEffect(() => {
+    if (pendingScrollRatio.current === null) return;
+    const ratio = pendingScrollRatio.current;
+    pendingScrollRatio.current = null;
+    const t = setTimeout(() => {
+      const el = activeScrollRef.current;
+      if (el) el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
+    }, 80);
+    return () => clearTimeout(t);
+  });
+
+  // ── Restore scroll on initial mount ───────────────────────────────────────
+  const mountRestored = useRef(false);
+  useEffect(() => {
+    if (mountRestored.current) return;
+    mountRestored.current = true;
+    const ratio = activeTab.scrollRatio ?? 0;
+    if (!ratio) return;
+    const t = setTimeout(() => {
+      const el = activeScrollRef.current;
+      if (el) el.scrollTop = ratio * (el.scrollHeight - el.clientHeight);
     }, 120);
     return () => clearTimeout(t);
   });
 
-  // ── Persist other settings ────────────────────────────────────────────────
-  useEffect(() => { lsSet(LS_THEME, themeId); }, [themeId]);
-  useEffect(() => { lsSet(LS_VIEW_MODE, viewMode); }, [viewMode]);
-  useEffect(() => { if (fileName) lsSet(LS_FILENAME, fileName); }, [fileName]);
+  // ── Tab management ────────────────────────────────────────────────────────
+  const switchTab = useCallback((newId: string) => {
+    if (newId === activeTabId) return;
+    // Save outgoing history
+    historyMapRef.current.set(activeTabId, historyRef.current);
+    // Find new tab
+    setTabs(prev => {
+      const newTab = prev.find(t => t.id === newId);
+      if (!newTab) return prev;
+      // Init history for incoming tab
+      const saved = historyMapRef.current.get(newId) ?? { stack: [newTab.content], index: 0 };
+      dispatch({ type: "init", state: saved });
+      // Schedule scroll restore
+      pendingScrollRatio.current = newTab.scrollRatio ?? 0;
+      return prev;
+    });
+    setActiveTabId(newId);
+  }, [activeTabId]);
 
-  // ── Switch view mode (preserving scroll ratio) ────────────────────────────
+  const newTab = useCallback(() => {
+    const tab = makeTab({ label: "Untitled" });
+    setTabs(prev => [...prev, tab]);
+    // Save outgoing history, init blank for new tab
+    historyMapRef.current.set(activeTabId, historyRef.current);
+    dispatch({ type: "init", state: { stack: [SAMPLE_MARKDOWN], index: 0 } });
+    pendingScrollRatio.current = 0;
+    setActiveTabId(tab.id);
+  }, [activeTabId]);
+
+  const closeTab = useCallback((id: string) => {
+    setTabs(prev => {
+      if (prev.length <= 1) return prev;
+      const idx = prev.findIndex(t => t.id === id);
+      const remaining = prev.filter(t => t.id !== id);
+      historyMapRef.current.delete(id);
+      if (id === activeTabId) {
+        const next = remaining[Math.min(idx, remaining.length - 1)];
+        const saved = historyMapRef.current.get(next.id) ?? { stack: [next.content], index: 0 };
+        dispatch({ type: "init", state: saved });
+        pendingScrollRatio.current = next.scrollRatio ?? 0;
+        setActiveTabId(next.id);
+      }
+      return remaining;
+    });
+  }, [activeTabId]);
+
+  const renameTab = useCallback((id: string, label: string) => {
+    setTabs(prev => prev.map(t => t.id === id ? { ...t, label } : t));
+  }, []);
+
+  const saveBookmark = useCallback((ratio: number) => {
+    setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, bookmark: ratio } : t));
+  }, [activeTabId]);
+
+  // ── Switch view (preserving scroll ratio) ─────────────────────────────────
   const switchMode = useCallback((next: ViewMode) => {
     if (next === viewMode) return;
     const getRatio = (el: HTMLDivElement | null) => {
@@ -500,8 +630,7 @@ export default function MarkdownViewer() {
       return max > 0 ? el.scrollTop / max : 0;
     };
     const applyRatio = (el: HTMLDivElement | null, r: number) => {
-      if (!el) return;
-      requestAnimationFrame(() => { el.scrollTop = r * (el.scrollHeight - el.clientHeight); });
+      if (el) requestAnimationFrame(() => { el.scrollTop = r * (el.scrollHeight - el.clientHeight); });
     };
     if (next === "split") {
       const r = getRatio(previewScrollRef.current);
@@ -514,17 +643,6 @@ export default function MarkdownViewer() {
     }
   }, [viewMode]);
 
-  // ── Download ──────────────────────────────────────────────────────────────
-  const handleDownload = useCallback(() => {
-    const blob = new Blob([content], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = fileName ?? "document.md";
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [content, fileName]);
-
   // ── File loading ──────────────────────────────────────────────────────────
   const loadFile = useCallback((file: File) => {
     if (!file.name.endsWith(".md") && !file.name.endsWith(".markdown")) {
@@ -534,12 +652,17 @@ export default function MarkdownViewer() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      dispatch({ type: "push", value: text });
-      setFileName(file.name);
-      lsSet(LS_CONTENT, text);
+      const label = file.name.replace(/\.(md|markdown)$/, "");
+      // Load into current tab, clear bookmark, reset scroll
+      dispatch({ type: "init", state: { stack: [text], index: 0 } });
+      setTabs(prev => prev.map(t => t.id === activeTabId
+        ? { ...t, content: text, fileName: file.name, label, bookmark: null, scrollRatio: 0 }
+        : t));
+      const el = activeScrollRef.current;
+      if (el) el.scrollTop = 0;
     };
     reader.readAsText(file);
-  }, []);
+  }, [activeTabId, activeScrollRef]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -558,17 +681,23 @@ export default function MarkdownViewer() {
     if (file) loadFile(file);
   }, [loadFile]);
 
+  // ── Download ──────────────────────────────────────────────────────────────
+  const handleDownload = useCallback(() => {
+    const blob = new Blob([content], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = activeTab.fileName ?? `${activeTab.label}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [content, activeTab]);
+
   // ── Editor keyboard shortcuts ─────────────────────────────────────────────
   const handleEditorKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const ta = textareaRef.current;
     if (!ta) return;
     const ctrl = e.ctrlKey || e.metaKey;
-
-    if (ctrl && e.key === "z") {
-      e.preventDefault();
-      dispatch(e.shiftKey ? { type: "redo" } : { type: "undo" });
-      return;
-    }
+    if (ctrl && e.key === "z") { e.preventDefault(); dispatch(e.shiftKey ? { type: "redo" } : { type: "undo" }); return; }
     if (ctrl && e.key === "y") { e.preventDefault(); dispatch({ type: "redo" }); return; }
     if (ctrl && e.key === "b") { e.preventDefault(); applyWrapping(ta, "**", "**", "bold text", setContent); }
     else if (ctrl && e.key === "i") { e.preventDefault(); applyWrapping(ta, "_", "_", "italic text", setContent); }
@@ -596,31 +725,26 @@ export default function MarkdownViewer() {
     }
   }, [setContent]);
 
-  // ── Page bg from theme ────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
   const pageBg = activeTheme.pageBg ?? "#f8fafc";
 
-  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <div
-      className="h-screen flex flex-col"
-      style={{ background: pageBg }}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
+    <div className="h-screen flex flex-col" style={{ background: pageBg }}
+      onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
+
       {/* Drag overlay */}
       {isDragging && (
         <div className="fixed inset-0 z-50 bg-black/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
           <div className="bg-white rounded-2xl shadow-2xl border-2 border-dashed border-slate-400 px-16 py-12 text-center">
             <div className="text-5xl mb-3">📄</div>
             <p className="text-xl font-semibold text-slate-700">Drop your Markdown file</p>
-            <p className="text-sm text-slate-500 mt-1">Release to load instantly</p>
+            <p className="text-sm text-slate-400 mt-1">Opens in the current tab</p>
           </div>
         </div>
       )}
 
       {/* Navbar */}
-      <header className="flex-shrink-0 sticky top-0 z-40 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm">
+      <header className="flex-shrink-0 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm z-40">
         <div className="max-w-screen-xl mx-auto px-5 h-14 flex items-center gap-4">
           {/* Logo */}
           <div className="flex items-center gap-2 flex-shrink-0">
@@ -637,34 +761,22 @@ export default function MarkdownViewer() {
             </span>
           </div>
 
-          {fileName && (
-            <span className="hidden sm:inline text-xs text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full truncate max-w-[180px]">
-              {fileName}
-            </span>
-          )}
-
           <div className="flex items-center gap-2 ml-auto">
             {/* View mode toggle */}
             <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-              <button onClick={() => switchMode("preview")}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${viewMode === "preview" ? "bg-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                style={viewMode === "preview" ? { color: activeTheme.h1Color } : {}}>
-                Preview
-              </button>
-              <button onClick={() => switchMode("split")}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${viewMode === "split" ? "bg-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                style={viewMode === "split" ? { color: activeTheme.h1Color } : {}}>
-                Split View
-              </button>
+              {(["preview", "split"] as ViewMode[]).map(m => (
+                <button key={m} onClick={() => switchMode(m)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all capitalize ${viewMode === m ? "bg-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                  style={viewMode === m ? { color: activeTheme.h1Color } : {}}>
+                  {m === "split" ? "Split View" : "Preview"}
+                </button>
+              ))}
             </div>
 
-            {/* Theme picker trigger */}
+            {/* Theme picker */}
             <div className="relative">
-              <button
-                onClick={() => setShowThemePicker(v => !v)}
-                title="Change theme"
-                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all ${showThemePicker ? "border-slate-300 bg-slate-100" : "border-slate-200 hover:border-slate-300 bg-white"}`}
-              >
+              <button onClick={() => setShowThemePicker(v => !v)} title="Change theme"
+                className={`w-8 h-8 flex items-center justify-center rounded-lg border transition-all ${showThemePicker ? "border-slate-300 bg-slate-100" : "border-slate-200 hover:border-slate-300 bg-white"}`}>
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
                   <circle cx="7" cy="7" r="2.5" fill={activeTheme.accentColor} />
                   <circle cx="7" cy="2" r="1.5" fill={activeTheme.h1Color} />
@@ -676,12 +788,10 @@ export default function MarkdownViewer() {
                 </svg>
               </button>
               {showThemePicker && (
-                <ThemePicker
-                  activeId={themeId}
+                <ThemePicker activeId={themeId}
                   onSelect={(id) => { setThemeId(id); setCustomTheme(null); setShowThemePicker(false); }}
                   onClose={() => setShowThemePicker(false)}
-                  onGenerated={(t) => { setCustomTheme(t); setShowThemePicker(false); }}
-                />
+                  onGenerated={(t) => { setCustomTheme(t); setShowThemePicker(false); }} />
               )}
             </div>
 
@@ -697,6 +807,17 @@ export default function MarkdownViewer() {
             <input ref={fileInputRef} type="file" accept=".md,.markdown" className="hidden" onChange={handleFileInput} />
           </div>
         </div>
+
+        {/* Tab bar */}
+        <TabBar
+          tabs={tabs}
+          activeId={activeTabId}
+          accentColor={activeTheme.accentColor}
+          onSwitch={switchTab}
+          onClose={closeTab}
+          onNew={newTab}
+          onRename={renameTab}
+        />
       </header>
 
       {/* Main */}
@@ -709,7 +830,6 @@ export default function MarkdownViewer() {
           </div>
         ) : (
           <div className="flex-1 flex overflow-hidden divide-x divide-slate-200">
-            {/* Edit pane */}
             <div className="w-1/2 flex flex-col bg-slate-900 raw-editor">
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 flex-shrink-0">
                 <div className="flex items-center gap-3">
@@ -720,7 +840,6 @@ export default function MarkdownViewer() {
                     <kbd className="bg-slate-800 px-1 py-0.5 rounded">⌘K</kbd> link
                     <kbd className="bg-slate-800 px-1 py-0.5 rounded">⌘`</kbd> code
                     <kbd className="bg-slate-800 px-1 py-0.5 rounded">⌘Z</kbd> undo
-                    <kbd className="bg-slate-800 px-1 py-0.5 rounded">⌘1-3</kbd> heading
                   </span>
                 </div>
                 <button onClick={handleDownload}
@@ -732,17 +851,12 @@ export default function MarkdownViewer() {
                   Download
                 </button>
               </div>
-              <textarea
-                ref={textareaRef}
+              <textarea ref={textareaRef}
                 className="flex-1 w-full bg-transparent text-slate-300 font-mono text-sm leading-relaxed p-5 resize-none outline-none placeholder-slate-600 raw-editor"
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                onKeyDown={handleEditorKeyDown}
-                spellCheck={false}
-                placeholder="Start typing Markdown here…"
-              />
+                value={content} onChange={e => setContent(e.target.value)}
+                onKeyDown={handleEditorKeyDown} spellCheck={false}
+                placeholder="Start typing Markdown here…" />
             </div>
-            {/* Preview pane */}
             <div ref={splitPreviewScrollRef} className="w-1/2 overflow-y-auto bg-white">
               <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white z-10">
                 <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Preview</span>
@@ -753,12 +867,17 @@ export default function MarkdownViewer() {
             </div>
           </div>
         )}
-        <ScrollBar scrollRef={activeScrollRef} />
+
+        <ScrollBar
+          scrollRef={activeScrollRef}
+          bookmark={activeTab.bookmark ?? null}
+          onSaveBookmark={saveBookmark}
+        />
       </main>
 
       {/* Footer */}
       <div className="flex-shrink-0 py-2 text-center text-xs text-slate-400 bg-white border-t border-slate-100">
-        Drop a <code className="text-rose-500 bg-rose-50 px-1 py-0.5 rounded">.md</code> file anywhere to load it
+        Drop a <code className="text-rose-500 bg-rose-50 px-1 py-0.5 rounded">.md</code> file anywhere · Double-click a tab to rename it
       </div>
     </div>
   );
