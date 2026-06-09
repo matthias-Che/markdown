@@ -12,7 +12,7 @@ import { SAMPLE_MARKDOWN } from "@/lib/sampleMarkdown";
 import themes, { themeMap, TOP_THEME_IDS, type Theme } from "@/lib/themes";
 import { generateThemeFromPrompt } from "@/lib/generateTheme";
 
-type ViewMode = "preview" | "split";
+type ViewMode = "preview" | "split" | "compare";
 
 // ── Tab data ──────────────────────────────────────────────────────────────────
 interface TabData {
@@ -20,7 +20,7 @@ interface TabData {
   label: string;
   fileName: string | null;
   content: string;
-  bookmark: number | null;  // scroll ratio, unique per tab
+  bookmark: number | null;
   scrollRatio: number;
 }
 
@@ -30,13 +30,13 @@ function makeTab(overrides: Partial<TabData> = {}): TabData {
     label: "Untitled",
     fileName: null,
     content: SAMPLE_MARKDOWN,
-    bookmark: null,      // no bookmark on new/uploaded tab
+    bookmark: null,
     scrollRatio: 0,
     ...overrides,
   };
 }
 
-// ── LocalStorage keys ─────────────────────────────────────────────────────────
+// ── LocalStorage ──────────────────────────────────────────────────────────────
 const LS_TABS       = "md-tabs";
 const LS_ACTIVE_TAB = "md-active-tab";
 const LS_VIEW_MODE  = "md-view-mode";
@@ -48,7 +48,6 @@ function lsGet(key: string): string | null {
 function lsSet(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch {}
 }
-
 function loadTabs(): TabData[] {
   try {
     const raw = lsGet(LS_TABS);
@@ -75,12 +74,22 @@ function historyReducer(s: HistoryState, a: HistoryAction): HistoryState {
       if (s.stack[s.index] === a.value) return s;
       const next = s.stack.slice(0, s.index + 1);
       next.push(a.value);
-      const trimmed = next.length > 500 ? next.slice(next.length - 500) : next;
-      return { stack: trimmed, index: trimmed.length - 1 };
+      const t = next.length > 500 ? next.slice(next.length - 500) : next;
+      return { stack: t, index: t.length - 1 };
     }
     case "undo": return { ...s, index: Math.max(0, s.index - 1) };
     case "redo": return { ...s, index: Math.min(s.stack.length - 1, s.index + 1) };
   }
+}
+
+// ── CSS vars from theme ───────────────────────────────────────────────────────
+function themeToVars(t: Theme): CSSProperties {
+  return {
+    "--md-h1": t.h1Color, "--md-accent": t.accentColor,
+    "--md-border-light": t.borderLight, "--md-border-lighter": t.borderLighter,
+    "--md-bg-tint": t.bgTint, "--md-code-fg": t.codeFg,
+    "--md-code-bg": t.codeBg, "--md-code-border": t.codeBorder,
+  } as CSSProperties;
 }
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
@@ -97,23 +106,23 @@ function MarkdownRenderer({ content, themeVars }: { content: string; themeVars: 
 // ── Editor helpers ────────────────────────────────────────────────────────────
 type SetContent = (v: string, immediate?: boolean) => void;
 
-function applyWrapping(ta: HTMLTextAreaElement, before: string, after: string, placeholder: string, onChange: SetContent) {
+function applyWrapping(ta: HTMLTextAreaElement, before: string, after: string, placeholder: string, fn: SetContent) {
   const { selectionStart: s, selectionEnd: e, value } = ta;
-  const selected = value.slice(s, e) || placeholder;
-  onChange(value.slice(0, s) + before + selected + after + value.slice(e), true);
-  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(s + before.length, s + before.length + selected.length); });
+  const sel = value.slice(s, e) || placeholder;
+  fn(value.slice(0, s) + before + sel + after + value.slice(e), true);
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(s + before.length, s + before.length + sel.length); });
 }
 
-function applyLinePrefix(ta: HTMLTextAreaElement, prefix: string, onChange: SetContent) {
+function applyLinePrefix(ta: HTMLTextAreaElement, prefix: string, fn: SetContent) {
   const { selectionStart, value } = ta;
-  const lineStart = value.lastIndexOf("\n", selectionStart - 1) + 1;
-  const lineEnd = value.indexOf("\n", selectionStart);
-  const end = lineEnd === -1 ? value.length : lineEnd;
-  const line = value.slice(lineStart, end);
+  const ls = value.lastIndexOf("\n", selectionStart - 1) + 1;
+  const le = value.indexOf("\n", selectionStart);
+  const end = le === -1 ? value.length : le;
+  const line = value.slice(ls, end);
   const has = line.startsWith(prefix);
-  const offset = has ? -prefix.length : prefix.length;
-  onChange(value.slice(0, lineStart) + (has ? line.slice(prefix.length) : prefix + line) + value.slice(end), true);
-  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(selectionStart + offset, selectionStart + offset); });
+  const off = has ? -prefix.length : prefix.length;
+  fn(value.slice(0, ls) + (has ? line.slice(prefix.length) : prefix + line) + value.slice(end), true);
+  requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(selectionStart + off, selectionStart + off); });
 }
 
 // ── Scroll progress hook ──────────────────────────────────────────────────────
@@ -132,7 +141,7 @@ function useScrollProgress(ref: React.RefObject<HTMLDivElement | null>) {
   return progress;
 }
 
-// ── Scroll bar + bookmark (props-driven, no internal LS) ──────────────────────
+// ── Scroll bar + bookmark ─────────────────────────────────────────────────────
 function ScrollBar({ scrollRef, bookmark, onSaveBookmark }: {
   scrollRef: React.RefObject<HTMLDivElement | null>;
   bookmark: number | null;
@@ -142,7 +151,7 @@ function ScrollBar({ scrollRef, bookmark, onSaveBookmark }: {
   const [showToast, setShowToast] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const saveBookmark = useCallback(() => {
+  const save = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
     const max = el.scrollHeight - el.clientHeight;
@@ -152,7 +161,7 @@ function ScrollBar({ scrollRef, bookmark, onSaveBookmark }: {
     toastTimer.current = setTimeout(() => setShowToast(false), 2000);
   }, [scrollRef, onSaveBookmark]);
 
-  const jumpToBookmark = useCallback(() => {
+  const jump = useCallback(() => {
     const el = scrollRef.current;
     if (!el || bookmark === null) return;
     el.scrollTo({ top: bookmark * (el.scrollHeight - el.clientHeight), behavior: "smooth" });
@@ -169,26 +178,98 @@ function ScrollBar({ scrollRef, bookmark, onSaveBookmark }: {
       <div className="relative w-1.5 h-48 bg-slate-200 rounded-full overflow-visible">
         <div className="absolute top-0 left-0 w-full bg-green-500 rounded-full transition-all duration-75" style={{ height: `${pct}%` }} />
         {bookmarkPct !== null && (
-          <button onClick={jumpToBookmark} title={`Jump to bookmark (${bookmarkPct}%)`}
+          <button onClick={jump} title={`Jump to bookmark (${bookmarkPct}%)`}
             className="absolute -left-1.5 w-4 h-1.5 bg-amber-400 hover:bg-amber-300 rounded-full transition-colors shadow cursor-pointer"
             style={{ top: `calc(${bookmarkPct}% - 3px)` }} />
         )}
       </div>
       <span className="text-[10px] font-mono text-slate-400 tabular-nums">{pct}%</span>
-      <button onClick={saveBookmark} title="Bookmark current position"
+      <button onClick={save} title="Bookmark current position"
         className="w-7 h-7 flex items-center justify-center rounded-full bg-white border border-slate-200 hover:border-amber-400 hover:text-amber-500 text-slate-400 shadow-sm transition-colors">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
           <path d="M2 1h8a1 1 0 011 1v9l-5-3-5 3V2a1 1 0 011-1z" />
         </svg>
       </button>
       {bookmarkPct !== null && (
-        <button onClick={jumpToBookmark} title={`Go to bookmark (${bookmarkPct}%)`}
+        <button onClick={jump} title={`Go to bookmark (${bookmarkPct}%)`}
           className="w-7 h-7 flex items-center justify-center rounded-full bg-amber-400 hover:bg-amber-300 text-white shadow-sm transition-colors">
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <path d="M6 10V2M3 5l3-3 3 3" />
           </svg>
         </button>
       )}
+    </div>
+  );
+}
+
+// ── Compare pane ──────────────────────────────────────────────────────────────
+function ComparePane({ tabId, tabs, themeVars, accentColor, onChangeTab, onClose }: {
+  tabId: string;
+  tabs: TabData[];
+  themeVars: CSSProperties;
+  accentColor: string;
+  onChangeTab: (id: string) => void;
+  onClose?: () => void;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const tab = tabs.find(t => t.id === tabId) ?? tabs[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+
+  return (
+    <div className="flex-1 flex flex-col overflow-hidden min-w-0 border-r border-slate-200 last:border-r-0">
+      {/* Pane header */}
+      <div className="flex items-center justify-between px-3 py-2 border-b border-slate-100 bg-slate-50 flex-shrink-0">
+        <div ref={menuRef} className="relative">
+          <button onClick={() => setOpen(v => !v)}
+            className="flex items-center gap-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 transition-colors">
+            <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: accentColor }} />
+            <span className="max-w-[140px] truncate">{tab.label}</span>
+            <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M1.5 3l3 3 3-3" />
+            </svg>
+          </button>
+          {open && (
+            <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl py-1.5 z-30 min-w-[160px]">
+              {tabs.map(t => (
+                <button key={t.id} onClick={() => { onChangeTab(t.id); setOpen(false); }}
+                  className={`w-full text-left flex items-center gap-2 px-3 py-1.5 text-xs transition-colors ${t.id === tabId ? "font-semibold text-slate-900 bg-slate-50" : "text-slate-600 hover:bg-slate-50"}`}>
+                  <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ background: t.id === tabId ? accentColor : "#cbd5e1" }} />
+                  <span className="truncate">{t.label}</span>
+                  {t.id === tabId && (
+                    <svg className="ml-auto flex-shrink-0" width="10" height="10" viewBox="0 0 10 10" fill="none">
+                      <path d="M2 5l2.5 2.5 4-4" stroke={accentColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {onClose && (
+          <button onClick={onClose} title="Remove pane"
+            className="w-5 h-5 flex items-center justify-center rounded text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors">
+            <svg width="9" height="9" viewBox="0 0 9 9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M1 1l7 7M8 1L1 8" />
+            </svg>
+          </button>
+        )}
+      </div>
+      {/* Scrollable content — independent per pane */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto scroll-smooth bg-white">
+        <div className="px-8 py-8 max-w-2xl mx-auto">
+          <MarkdownRenderer content={tab.content} themeVars={themeVars} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -206,7 +287,7 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const startEdit = (tab: TabData) => {
     setEditingId(tab.id);
@@ -215,79 +296,46 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
   };
 
   const commitEdit = () => {
-    if (editingId) {
-      onRename(editingId, editValue.trim() || "Untitled");
-      setEditingId(null);
-    }
+    if (editingId) { onRename(editingId, editValue.trim() || "Untitled"); setEditingId(null); }
   };
 
-  // Scroll active tab into view
   useEffect(() => {
-    const container = scrollRef.current;
+    const container = containerRef.current;
     if (!container) return;
-    const activeEl = container.querySelector(`[data-tabid="${activeId}"]`) as HTMLElement | null;
-    if (activeEl) activeEl.scrollIntoView({ inline: "nearest", block: "nearest" });
+    const el = container.querySelector(`[data-tabid="${activeId}"]`) as HTMLElement | null;
+    if (el) el.scrollIntoView({ inline: "nearest", block: "nearest" });
   }, [activeId]);
 
   return (
-    <div className="flex items-end bg-slate-100 border-b border-slate-200 px-2 flex-shrink-0 overflow-hidden">
-      {/* Scrollable tab list */}
-      <div ref={scrollRef} className="flex items-end overflow-x-auto flex-1 scrollbar-none gap-0.5 pt-1.5">
-        {tabs.map((tab) => {
+    <div className="flex items-end bg-slate-100 border-b border-slate-200 px-2 flex-shrink-0">
+      <div ref={containerRef} className="flex items-end overflow-x-auto flex-1 gap-0.5 pt-1.5" style={{ scrollbarWidth: "none" }}>
+        {tabs.map(tab => {
           const isActive = tab.id === activeId;
           return (
-            <div
-              key={tab.id}
-              data-tabid={tab.id}
+            <div key={tab.id} data-tabid={tab.id}
               className={`group relative flex items-center gap-1.5 px-3 py-2 rounded-t-lg cursor-pointer flex-shrink-0 max-w-[180px] min-w-[80px] transition-all select-none ${
-                isActive
-                  ? "bg-white border border-b-0 border-slate-200 shadow-sm z-10"
-                  : "bg-slate-100 hover:bg-slate-50 border border-transparent"
+                isActive ? "bg-white border border-b-0 border-slate-200 shadow-sm z-10" : "bg-slate-100 hover:bg-slate-50 border border-transparent"
               }`}
               style={isActive ? { borderBottomColor: "white" } : {}}
               onClick={() => !editingId && onSwitch(tab.id)}
               onDoubleClick={() => startEdit(tab)}
             >
-              {/* Active indicator stripe */}
-              {isActive && (
-                <span className="absolute top-0 left-3 right-3 h-0.5 rounded-b" style={{ background: accentColor }} />
-              )}
-
-              {/* File dot */}
-              <span className="w-2 h-2 rounded-full flex-shrink-0 opacity-70"
-                style={{ background: isActive ? accentColor : "#94a3b8" }} />
-
-              {/* Label / edit input */}
+              {isActive && <span className="absolute top-0 left-3 right-3 h-0.5 rounded-b" style={{ background: accentColor }} />}
+              <span className="w-2 h-2 rounded-full flex-shrink-0 opacity-70" style={{ background: isActive ? accentColor : "#94a3b8" }} />
               {editingId === tab.id ? (
-                <input
-                  ref={inputRef}
-                  value={editValue}
-                  onChange={e => setEditValue(e.target.value)}
+                <input ref={inputRef} value={editValue} onChange={e => setEditValue(e.target.value)}
                   onBlur={commitEdit}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") commitEdit();
-                    if (e.key === "Escape") setEditingId(null);
-                    e.stopPropagation();
-                  }}
+                  onKeyDown={e => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditingId(null); e.stopPropagation(); }}
                   className="flex-1 min-w-0 text-xs outline-none bg-transparent border-b border-slate-400 text-slate-800"
-                  onClick={e => e.stopPropagation()}
-                />
+                  onClick={e => e.stopPropagation()} />
               ) : (
-                <span className={`flex-1 min-w-0 truncate text-xs ${isActive ? "text-slate-800 font-medium" : "text-slate-500"}`}>
-                  {tab.label}
-                </span>
+                <span className={`flex-1 min-w-0 truncate text-xs ${isActive ? "text-slate-800 font-medium" : "text-slate-500"}`}>{tab.label}</span>
               )}
-
-              {/* Close button */}
               {tabs.length > 1 && (
-                <button
-                  onClick={e => { e.stopPropagation(); onClose(tab.id); }}
+                <button onClick={e => { e.stopPropagation(); onClose(tab.id); }}
                   className={`flex-shrink-0 w-4 h-4 flex items-center justify-center rounded transition-colors ${
-                    isActive
-                      ? "text-slate-400 hover:text-red-500 hover:bg-red-50"
-                      : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 hover:bg-red-50"
-                  }`}
-                >
+                    isActive ? "text-slate-400 hover:text-red-500 hover:bg-red-50" : "opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-500 hover:bg-red-50"
+                  }`}>
                   <svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
                     <path d="M1 1l6 6M7 1L1 7" />
                   </svg>
@@ -297,13 +345,8 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
           );
         })}
       </div>
-
-      {/* New tab button */}
-      <button
-        onClick={onNew}
-        title="New tab"
-        className="flex-shrink-0 w-7 h-7 mb-1 ml-1 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors"
-      >
+      <button onClick={onNew} title="New tab"
+        className="flex-shrink-0 w-7 h-7 mb-1 ml-1 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200 transition-colors">
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
           <path d="M6 2v8M2 6h8" />
         </svg>
@@ -316,16 +359,11 @@ function TabBar({ tabs, activeId, accentColor, onSwitch, onClose, onNew, onRenam
 function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick} title={theme.name}
-      className={`group relative flex flex-col rounded-xl overflow-hidden border-2 transition-all duration-150 text-left ${
-        active ? "border-slate-400 shadow-md scale-[1.03]" : "border-transparent hover:border-slate-200 hover:shadow-sm"
-      }`}
-    >
+      className={`group relative flex flex-col rounded-xl overflow-hidden border-2 transition-all duration-150 text-left ${active ? "border-slate-400 shadow-md scale-[1.03]" : "border-transparent hover:border-slate-200 hover:shadow-sm"}`}>
       <div className="h-9 w-full flex">
-        <span className="flex-1" style={{ background: theme.h1Color }} />
-        <span className="flex-1" style={{ background: theme.accentColor }} />
-        <span className="flex-[0.6]" style={{ background: theme.borderLight }} />
-        <span className="flex-[0.4]" style={{ background: theme.codeFg }} />
-        <span className="flex-[0.6]" style={{ background: theme.codeBg }} />
+        {[theme.h1Color, theme.accentColor, theme.borderLight, theme.codeFg, theme.codeBg].map((c, i) => (
+          <span key={i} className={i < 2 ? "flex-1" : "flex-[0.6]"} style={{ background: c }} />
+        ))}
       </div>
       <div className="px-2 py-1.5 flex flex-col gap-0.5" style={{ background: theme.bgTint }}>
         <span className="text-[10px] font-bold leading-none truncate" style={{ color: theme.h1Color }}>{theme.name}</span>
@@ -344,10 +382,7 @@ function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; 
 
 // ── Theme picker ──────────────────────────────────────────────────────────────
 function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
-  activeId: string;
-  onSelect: (id: string) => void;
-  onClose: () => void;
-  onGenerated: (theme: Theme) => void;
+  activeId: string; onSelect: (id: string) => void; onClose: () => void; onGenerated: (t: Theme) => void;
 }) {
   const [tab, setTab] = useState<"browse" | "generate">("browse");
   const [expanded, setExpanded] = useState(false);
@@ -361,9 +396,9 @@ function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   const displayThemes = expanded || search.trim() ? filteredAll : topThemes;
 
   useEffect(() => {
-    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    const h = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) onClose(); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
   }, [onClose]);
 
   useEffect(() => {
@@ -376,15 +411,14 @@ function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
 
   return (
     <div ref={ref} className="absolute right-0 top-full mt-2 bg-white border border-slate-200 rounded-2xl shadow-2xl z-50 overflow-hidden" style={{ width: "480px" }}>
-      <div className="flex items-center gap-0 border-b border-slate-100 px-4 pt-3">
+      <div className="flex items-center border-b border-slate-100 px-4 pt-3">
         {(["browse", "generate"] as const).map(t => (
           <button key={t} onClick={() => setTab(t)}
-            className={`pb-2.5 px-1 mr-4 text-xs font-semibold border-b-2 transition-colors capitalize ${tab === t ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"}`}>
+            className={`pb-2.5 px-1 mr-4 text-xs font-semibold border-b-2 transition-colors ${tab === t ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"}`}>
             {t === "generate" ? "✦ Generate" : "Browse themes"}
           </button>
         ))}
       </div>
-
       {tab === "browse" ? (
         <div className="p-4">
           <div className="relative mb-3">
@@ -452,16 +486,6 @@ function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   );
 }
 
-// ── CSS vars from theme ───────────────────────────────────────────────────────
-function themeToVars(t: Theme): CSSProperties {
-  return {
-    "--md-h1": t.h1Color, "--md-accent": t.accentColor,
-    "--md-border-light": t.borderLight, "--md-border-lighter": t.borderLighter,
-    "--md-bg-tint": t.bgTint, "--md-code-fg": t.codeFg,
-    "--md-code-bg": t.codeBg, "--md-code-border": t.codeBorder,
-  } as CSSProperties;
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 export default function MarkdownViewer() {
   // ── Tabs ──────────────────────────────────────────────────────────────────
@@ -469,21 +493,15 @@ export default function MarkdownViewer() {
   const [activeTabId, setActiveTabId] = useState<string>(() => {
     const saved = lsGet(LS_ACTIVE_TAB);
     const loaded = loadTabs();
-    return saved && loaded.find(t => t.id === saved) ? saved : loaded[0].id;
+    return (saved && loaded.find(t => t.id === saved)) ? saved : loaded[0].id;
   });
-
   const activeTab = tabs.find(t => t.id === activeTabId) ?? tabs[0];
 
-  // ── History (active tab only; inactive tabs stored in historyMapRef) ───────
+  // ── History ───────────────────────────────────────────────────────────────
   const historyMapRef = useRef<Map<string, HistoryState>>(new Map());
   const historyRef = useRef<HistoryState>({ stack: [activeTab.content], index: 0 });
-
-  const [history, dispatch] = useReducer(historyReducer, {
-    stack: [activeTab.content], index: 0,
-  });
+  const [history, dispatch] = useReducer(historyReducer, { stack: [activeTab.content], index: 0 });
   const content = history.stack[history.index];
-
-  // Keep historyRef in sync so tab switches can read current state
   useEffect(() => { historyRef.current = history; }, [history]);
 
   const historyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -495,12 +513,18 @@ export default function MarkdownViewer() {
     }
   }, []);
 
-  // ── Other state ───────────────────────────────────────────────────────────
-  const [viewMode, setViewMode] = useState<ViewMode>(() => (lsGet(LS_VIEW_MODE) as ViewMode) ?? "preview");
+  // ── UI state ──────────────────────────────────────────────────────────────
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    const v = lsGet(LS_VIEW_MODE) as ViewMode;
+    return (v === "preview" || v === "split") ? v : "preview";
+  });
   const [themeId, setThemeId] = useState<string>(() => lsGet(LS_THEME) ?? "forest");
   const [customTheme, setCustomTheme] = useState<Theme | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [showThemePicker, setShowThemePicker] = useState(false);
+
+  // Compare mode pane tab IDs
+  const [comparePaneIds, setComparePaneIds] = useState<string[]>([]);
 
   const activeTheme = customTheme ?? themeMap[themeId] ?? themeMap["forest"];
   const themeVars = themeToVars(activeTheme);
@@ -512,7 +536,10 @@ export default function MarkdownViewer() {
   const splitPreviewScrollRef = useRef<HTMLDivElement>(null);
   const activeScrollRef = viewMode === "preview" ? previewScrollRef : splitPreviewScrollRef;
 
-  // Always-current refs for beforeunload flush
+  // Prevent saving scroll during programmatic restoration
+  const isRestoringScroll = useRef(false);
+
+  // Always-current refs for beforeunload
   const latestTabsRef = useRef(tabs);
   const latestContentRef = useRef(content);
   const latestActiveTabIdRef = useRef(activeTabId);
@@ -520,10 +547,9 @@ export default function MarkdownViewer() {
   useEffect(() => { latestContentRef.current = content; }, [content]);
   useEffect(() => { latestActiveTabIdRef.current = activeTabId; }, [activeTabId]);
 
-  // ── Force-flush tabs before page unload ───────────────────────────────────
+  // ── Force-flush before unload ──────────────────────────────────────────────
   useEffect(() => {
     const flush = () => {
-      // Merge latest content into tabs array and save synchronously
       const saved = latestTabsRef.current.map(t =>
         t.id === latestActiveTabIdRef.current ? { ...t, content: latestContentRef.current } : t
       );
@@ -534,41 +560,43 @@ export default function MarkdownViewer() {
     return () => window.removeEventListener("beforeunload", flush);
   }, []);
 
-  // ── Sync active tab content → tabs array (for persistence) ────────────────
+  // ── Sync active content → tabs ────────────────────────────────────────────
   useEffect(() => {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, content } : t));
   }, [content, activeTabId]);
 
-  // ── Persist everything ────────────────────────────────────────────────────
+  // ── Persist ───────────────────────────────────────────────────────────────
   useEffect(() => {
-    const timer = setTimeout(() => lsSet(LS_TABS, JSON.stringify(tabs)), 600);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => lsSet(LS_TABS, JSON.stringify(tabs)), 600);
+    return () => clearTimeout(t);
   }, [tabs]);
   useEffect(() => { lsSet(LS_ACTIVE_TAB, activeTabId); }, [activeTabId]);
   useEffect(() => { lsSet(LS_VIEW_MODE, viewMode); }, [viewMode]);
   useEffect(() => { lsSet(LS_THEME, themeId); }, [themeId]);
 
-  // ── Save scroll ratio to active tab ───────────────────────────────────────
+  // ── Smooth scroll helper (sets restoring flag to block scroll-save) ────────
+  const smoothScrollTo = useCallback((el: HTMLDivElement, ratio: number) => {
+    isRestoringScroll.current = true;
+    el.scrollTo({ top: ratio * (el.scrollHeight - el.clientHeight), behavior: "smooth" });
+    // Clear flag after animation (smooth scroll ≈ 300-500 ms)
+    setTimeout(() => { isRestoringScroll.current = false; }, 700);
+  }, []);
+
+  // ── Save scroll ratio (blocked during restoration) ────────────────────────
   useEffect(() => {
     const el = activeScrollRef.current;
     if (!el) return;
     const fn = () => {
+      if (isRestoringScroll.current) return;   // ← ignore restoration events
       const max = el.scrollHeight - el.clientHeight;
-      if (max > 0) {
+      if (max > 0)
         setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, scrollRatio: el.scrollTop / max } : t));
-      }
     };
     el.addEventListener("scroll", fn, { passive: true });
     return () => el.removeEventListener("scroll", fn);
   }, [activeScrollRef, activeTabId, viewMode]);
 
-  // ── Smooth scroll helper ──────────────────────────────────────────────────
-  const smoothScrollTo = useCallback((el: HTMLDivElement, ratio: number) => {
-    const top = ratio * (el.scrollHeight - el.clientHeight);
-    el.scrollTo({ top, behavior: "smooth" });
-  }, []);
-
-  // ── Restore scroll on tab switch (smooth) ────────────────────────────────
+  // ── Restore scroll on tab switch ──────────────────────────────────────────
   const pendingScrollRatio = useRef<number | null>(null);
   useEffect(() => {
     if (pendingScrollRatio.current === null) return;
@@ -581,14 +609,13 @@ export default function MarkdownViewer() {
     return () => clearTimeout(t);
   });
 
-  // ── Restore scroll on initial page load (smooth, longer delay) ───────────
+  // ── Restore scroll on initial page load (smooth) ──────────────────────────
   const mountRestored = useRef(false);
   useEffect(() => {
     if (mountRestored.current) return;
     mountRestored.current = true;
     const ratio = activeTab.scrollRatio ?? 0;
     if (!ratio) return;
-    // Wait for the full content render before smooth-scrolling into position
     const t = setTimeout(() => {
       const el = activeScrollRef.current;
       if (el) smoothScrollTo(el, ratio);
@@ -599,16 +626,12 @@ export default function MarkdownViewer() {
   // ── Tab management ────────────────────────────────────────────────────────
   const switchTab = useCallback((newId: string) => {
     if (newId === activeTabId) return;
-    // Save outgoing history
     historyMapRef.current.set(activeTabId, historyRef.current);
-    // Find new tab
     setTabs(prev => {
       const newTab = prev.find(t => t.id === newId);
       if (!newTab) return prev;
-      // Init history for incoming tab
       const saved = historyMapRef.current.get(newId) ?? { stack: [newTab.content], index: 0 };
       dispatch({ type: "init", state: saved });
-      // Schedule scroll restore
       pendingScrollRatio.current = newTab.scrollRatio ?? 0;
       return prev;
     });
@@ -618,7 +641,6 @@ export default function MarkdownViewer() {
   const newTab = useCallback(() => {
     const tab = makeTab({ label: "Untitled" });
     setTabs(prev => [...prev, tab]);
-    // Save outgoing history, init blank for new tab
     historyMapRef.current.set(activeTabId, historyRef.current);
     dispatch({ type: "init", state: { stack: [SAMPLE_MARKDOWN], index: 0 } });
     pendingScrollRatio.current = 0;
@@ -631,6 +653,8 @@ export default function MarkdownViewer() {
       const idx = prev.findIndex(t => t.id === id);
       const remaining = prev.filter(t => t.id !== id);
       historyMapRef.current.delete(id);
+      // Also remove from compare panes
+      setComparePaneIds(cp => cp.filter(pid => pid !== id));
       if (id === activeTabId) {
         const next = remaining[Math.min(idx, remaining.length - 1)];
         const saved = historyMapRef.current.get(next.id) ?? { stack: [next.content], index: 0 };
@@ -650,9 +674,37 @@ export default function MarkdownViewer() {
     setTabs(prev => prev.map(t => t.id === activeTabId ? { ...t, bookmark: ratio } : t));
   }, [activeTabId]);
 
-  // ── Switch view (preserving scroll ratio) ─────────────────────────────────
+  // ── Compare mode ──────────────────────────────────────────────────────────
+  const enterCompareMode = useCallback(() => {
+    // Initialize with first two distinct tabs
+    const ids = tabs.slice(0, Math.min(tabs.length, 2)).map(t => t.id);
+    if (ids.length < 2) {
+      // Only one tab — duplicate it in the view
+      ids.push(ids[0]);
+    }
+    setComparePaneIds(ids);
+    setViewMode("compare");
+  }, [tabs]);
+
+  const updateComparePane = useCallback((idx: number, tabId: string) => {
+    setComparePaneIds(prev => { const next = [...prev]; next[idx] = tabId; return next; });
+  }, []);
+
+  const addComparePane = useCallback(() => {
+    setComparePaneIds(prev => {
+      const unused = tabs.find(t => !prev.includes(t.id));
+      return unused ? [...prev, unused.id] : [...prev, tabs[0].id];
+    });
+  }, [tabs]);
+
+  const removeComparePane = useCallback((idx: number) => {
+    setComparePaneIds(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+
+  // ── Switch view mode (preserving scroll ratio) ────────────────────────────
   const switchMode = useCallback((next: ViewMode) => {
     if (next === viewMode) return;
+    if (next === "compare") { enterCompareMode(); return; }
     const getRatio = (el: HTMLDivElement | null) => {
       if (!el) return 0;
       const max = el.scrollHeight - el.clientHeight;
@@ -670,7 +722,7 @@ export default function MarkdownViewer() {
       setViewMode(next);
       requestAnimationFrame(() => applyRatio(previewScrollRef.current, r));
     }
-  }, [viewMode]);
+  }, [viewMode, enterCompareMode, smoothScrollTo]);
 
   // ── File loading ──────────────────────────────────────────────────────────
   const loadFile = useCallback((file: File) => {
@@ -682,11 +734,9 @@ export default function MarkdownViewer() {
     reader.onload = (e) => {
       const text = e.target?.result as string;
       const label = file.name.replace(/\.(md|markdown)$/, "");
-      // Load into current tab, clear bookmark, reset scroll
       dispatch({ type: "init", state: { stack: [text], index: 0 } });
       setTabs(prev => prev.map(t => t.id === activeTabId
-        ? { ...t, content: text, fileName: file.name, label, bookmark: null, scrollRatio: 0 }
-        : t));
+        ? { ...t, content: text, fileName: file.name, label, bookmark: null, scrollRatio: 0 } : t));
       const el = activeScrollRef.current;
       if (el) el.scrollTop = 0;
     };
@@ -754,14 +804,13 @@ export default function MarkdownViewer() {
     }
   }, [setContent]);
 
-  // ── Render ────────────────────────────────────────────────────────────────
   const pageBg = activeTheme.pageBg ?? "#f8fafc";
 
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="h-screen flex flex-col" style={{ background: pageBg }}
       onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={handleDrop}>
 
-      {/* Drag overlay */}
       {isDragging && (
         <div className="fixed inset-0 z-50 bg-black/10 backdrop-blur-sm flex items-center justify-center pointer-events-none">
           <div className="bg-white rounded-2xl shadow-2xl border-2 border-dashed border-slate-400 px-16 py-12 text-center">
@@ -775,7 +824,6 @@ export default function MarkdownViewer() {
       {/* Navbar */}
       <header className="flex-shrink-0 bg-white/90 backdrop-blur border-b border-slate-200 shadow-sm z-40">
         <div className="max-w-screen-xl mx-auto px-5 h-14 flex items-center gap-4">
-          {/* Logo */}
           <div className="flex items-center gap-2 flex-shrink-0">
             <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: activeTheme.h1Color }}>
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
@@ -793,13 +841,17 @@ export default function MarkdownViewer() {
           <div className="flex items-center gap-2 ml-auto">
             {/* View mode toggle */}
             <div className="flex items-center bg-slate-100 rounded-lg p-0.5 gap-0.5">
-              {(["preview", "split"] as ViewMode[]).map(m => (
-                <button key={m} onClick={() => switchMode(m)}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all capitalize ${viewMode === m ? "bg-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
-                  style={viewMode === m ? { color: activeTheme.h1Color } : {}}>
-                  {m === "split" ? "Split View" : "Preview"}
-                </button>
-              ))}
+              {([["preview", "Preview"], ["split", "Split View"], ["compare", "Compare"]] as [ViewMode, string][]).map(([m, label]) => {
+                // Only show Compare when there are multiple tabs
+                if (m === "compare" && tabs.length < 2) return null;
+                return (
+                  <button key={m} onClick={() => switchMode(m)}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${viewMode === m ? "bg-white shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                    style={viewMode === m ? { color: activeTheme.h1Color } : {}}>
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Theme picker */}
@@ -837,27 +889,24 @@ export default function MarkdownViewer() {
           </div>
         </div>
 
-        {/* Tab bar */}
-        <TabBar
-          tabs={tabs}
-          activeId={activeTabId}
-          accentColor={activeTheme.accentColor}
-          onSwitch={switchTab}
-          onClose={closeTab}
-          onNew={newTab}
-          onRename={renameTab}
-        />
+        <TabBar tabs={tabs} activeId={activeTabId} accentColor={activeTheme.accentColor}
+          onSwitch={switchTab} onClose={closeTab} onNew={newTab} onRename={renameTab} />
       </header>
 
       {/* Main */}
       <main className="flex-1 flex overflow-hidden relative">
-        {viewMode === "preview" ? (
+
+        {/* ── Preview ── */}
+        {viewMode === "preview" && (
           <div ref={previewScrollRef} className="flex-1 overflow-y-auto scroll-smooth">
             <div className="max-w-3xl mx-auto px-6 py-12">
               <MarkdownRenderer content={content} themeVars={themeVars} />
             </div>
           </div>
-        ) : (
+        )}
+
+        {/* ── Split (edit + preview) ── */}
+        {viewMode === "split" && (
           <div className="flex-1 flex overflow-hidden divide-x divide-slate-200">
             <div className="w-1/2 flex flex-col bg-slate-900 raw-editor">
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-700 flex-shrink-0">
@@ -887,7 +936,7 @@ export default function MarkdownViewer() {
                 placeholder="Start typing Markdown here…" />
             </div>
             <div ref={splitPreviewScrollRef} className="w-1/2 overflow-y-auto bg-white scroll-smooth">
-              <div className="flex items-center gap-2 px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white z-10">
+              <div className="flex items-center px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white z-10">
                 <span className="text-xs font-medium text-slate-400 uppercase tracking-wider">Preview</span>
               </div>
               <div className="px-8 py-8">
@@ -897,14 +946,39 @@ export default function MarkdownViewer() {
           </div>
         )}
 
-        <ScrollBar
-          scrollRef={activeScrollRef}
-          bookmark={activeTab.bookmark ?? null}
-          onSaveBookmark={saveBookmark}
-        />
+        {/* ── Compare (multi-pane) ── */}
+        {viewMode === "compare" && (
+          <div className="flex-1 flex overflow-hidden">
+            {comparePaneIds.map((tabId, idx) => (
+              <ComparePane
+                key={idx}
+                tabId={tabId}
+                tabs={tabs}
+                themeVars={themeVars}
+                accentColor={activeTheme.accentColor}
+                onChangeTab={(id) => updateComparePane(idx, id)}
+                onClose={comparePaneIds.length > 2 ? () => removeComparePane(idx) : undefined}
+              />
+            ))}
+            {/* Add pane button — up to 4 panes */}
+            {comparePaneIds.length < 4 && (
+              <button onClick={addComparePane}
+                className="flex-shrink-0 w-10 flex items-center justify-center bg-slate-50 border-l border-slate-200 text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                title="Add another pane">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+                  <path d="M7 2v10M2 7h10" />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Scroll progress bar — only in preview and split */}
+        {viewMode !== "compare" && (
+          <ScrollBar scrollRef={activeScrollRef} bookmark={activeTab.bookmark ?? null} onSaveBookmark={saveBookmark} />
+        )}
       </main>
 
-      {/* Footer */}
       <div className="flex-shrink-0 py-2 text-center text-xs text-slate-400 bg-white border-t border-slate-100">
         Drop a <code className="text-rose-500 bg-rose-50 px-1 py-0.5 rounded">.md</code> file anywhere · Double-click a tab to rename it
       </div>
