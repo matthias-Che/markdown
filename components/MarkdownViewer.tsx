@@ -10,6 +10,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import { SAMPLE_MARKDOWN } from "@/lib/sampleMarkdown";
 import themes, { themeMap, TOP_THEME_IDS, type Theme } from "@/lib/themes";
+import { generateThemeFromPrompt } from "@/lib/generateTheme";
 
 type ViewMode = "preview" | "split";
 
@@ -177,34 +178,65 @@ function ScrollBar({ scrollRef }: { scrollRef: React.RefObject<HTMLDivElement | 
   );
 }
 
-// ── Theme swatch ─────────────────────────────────────────────────────────────
-function ThemeSwatch({ theme, active, onClick }: { theme: Theme; active: boolean; onClick: () => void }) {
+// ── Theme card ────────────────────────────────────────────────────────────────
+function ThemeCard({ theme, active, onClick }: { theme: Theme; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
       title={theme.name}
-      className={`group flex flex-col items-center gap-1 p-1.5 rounded-lg transition-all ${active ? "ring-2 ring-offset-1 ring-slate-400 bg-slate-100" : "hover:bg-slate-50"}`}
+      className={`group relative flex flex-col rounded-xl overflow-hidden border-2 transition-all duration-150 text-left ${
+        active
+          ? "border-slate-400 shadow-md scale-[1.03]"
+          : "border-transparent hover:border-slate-200 hover:shadow-sm"
+      }`}
     >
-      <div className="flex gap-0.5">
-        <span className="w-4 h-4 rounded-sm shadow-sm" style={{ background: theme.h1Color }} />
-        <span className="w-4 h-4 rounded-sm shadow-sm" style={{ background: theme.accentColor }} />
-        <span className="w-4 h-4 rounded-sm shadow-sm" style={{ background: theme.codeFg }} />
+      {/* Color bar: gradient of the three palette colors */}
+      <div className="h-9 w-full flex">
+        <span className="flex-1" style={{ background: theme.h1Color }} />
+        <span className="flex-1" style={{ background: theme.accentColor }} />
+        <span className="flex-[0.6]" style={{ background: theme.borderLight }} />
+        <span className="flex-[0.4]" style={{ background: theme.codeFg }} />
+        <span className="flex-[0.6]" style={{ background: theme.codeBg }} />
       </div>
-      <span className="text-[9px] text-slate-500 leading-none whitespace-nowrap">{theme.name}</span>
+      {/* Mini preview text on tinted bg */}
+      <div className="px-2 py-1.5 flex flex-col gap-0.5" style={{ background: theme.bgTint }}>
+        <span className="text-[10px] font-bold leading-none truncate" style={{ color: theme.h1Color }}>
+          {theme.name}
+        </span>
+        <span className="text-[8px] leading-none" style={{ color: theme.accentColor }}>Aa</span>
+      </div>
+      {/* Active check */}
+      {active && (
+        <span className="absolute top-1 right-1 w-4 h-4 bg-white rounded-full flex items-center justify-center shadow">
+          <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+            <path d="M1 4l2 2 4-4" stroke="#166534" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </span>
+      )}
     </button>
   );
 }
 
 // ── Theme picker panel ────────────────────────────────────────────────────────
-function ThemePicker({ activeId, onSelect, onClose }: {
+function ThemePicker({ activeId, onSelect, onClose, onGenerated }: {
   activeId: string;
   onSelect: (id: string) => void;
   onClose: () => void;
+  onGenerated: (theme: Theme) => void;
 }) {
+  const [tab, setTab] = useState<"browse" | "generate">("browse");
   const [expanded, setExpanded] = useState(false);
-  const topThemes = TOP_THEME_IDS.map(id => themeMap[id]).filter(Boolean);
-  const restThemes = themes.filter(t => !TOP_THEME_IDS.includes(t.id));
+  const [search, setSearch] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [previewTheme, setPreviewTheme] = useState<Theme | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+
+  const topThemes = TOP_THEME_IDS.map(id => themeMap[id]).filter(Boolean);
+  const allThemes = themes;
+  const filteredAll = search.trim()
+    ? allThemes.filter(t => t.name.toLowerCase().includes(search.toLowerCase()))
+    : allThemes;
+  const displayThemes = expanded ? filteredAll : (search.trim() ? filteredAll : topThemes);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -214,39 +246,157 @@ function ThemePicker({ activeId, onSelect, onClose }: {
     return () => document.removeEventListener("mousedown", handler);
   }, [onClose]);
 
-  return (
-    <div ref={ref}
-      className="absolute right-0 top-full mt-2 bg-white border border-slate-200 rounded-xl shadow-xl p-3 z-50 w-72"
-    >
-      <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-2 px-1">Theme</p>
+  // Live preview while typing prompt
+  useEffect(() => {
+    if (!prompt.trim()) { setPreviewTheme(null); return; }
+    const t = setTimeout(() => setPreviewTheme(generateThemeFromPrompt(prompt)), 300);
+    return () => clearTimeout(t);
+  }, [prompt]);
 
-      {/* Top 5 */}
-      <div className="flex gap-1 flex-wrap">
-        {topThemes.map(t => (
-          <ThemeSwatch key={t.id} theme={t} active={activeId === t.id} onClick={() => onSelect(t.id)} />
-        ))}
+  const applyGenerated = () => {
+    if (!previewTheme) return;
+    onGenerated(previewTheme);
+    onClose();
+  };
+
+  const examples = ["ice", "sunset", "forest", "candy", "galaxy", "coffee", "neon", "desert"];
+
+  return (
+    <div
+      ref={ref}
+      className="absolute right-0 top-full mt-2 bg-white border border-slate-200 rounded-2xl shadow-2xl z-50 overflow-hidden"
+      style={{ width: "480px" }}
+    >
+      {/* Header tabs */}
+      <div className="flex items-center gap-0 border-b border-slate-100 px-4 pt-3">
+        <button
+          onClick={() => setTab("browse")}
+          className={`pb-2.5 px-1 mr-4 text-xs font-semibold border-b-2 transition-colors ${
+            tab === "browse" ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"
+          }`}
+        >
+          Browse themes
+        </button>
+        <button
+          onClick={() => setTab("generate")}
+          className={`pb-2.5 px-1 text-xs font-semibold border-b-2 transition-colors flex items-center gap-1.5 ${
+            tab === "generate" ? "border-slate-800 text-slate-800" : "border-transparent text-slate-400 hover:text-slate-600"
+          }`}
+        >
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M6 1v2M6 9v2M1 6h2M9 6h2M2.5 2.5l1.5 1.5M8 8l1.5 1.5M2.5 9.5L4 8M8 4l1.5-1.5" />
+          </svg>
+          Generate
+        </button>
       </div>
 
-      {/* Expand to all 50 */}
-      {!expanded ? (
-        <button onClick={() => setExpanded(true)}
-          className="mt-2 w-full text-[11px] text-slate-500 hover:text-slate-700 py-1.5 rounded-lg hover:bg-slate-50 transition-colors border border-dashed border-slate-200">
-          Show all {themes.length} themes ▾
-        </button>
-      ) : (
-        <>
-          <div className="mt-2 border-t border-slate-100 pt-2 max-h-72 overflow-y-auto">
-            <div className="grid grid-cols-5 gap-0.5">
-              {restThemes.map(t => (
-                <ThemeSwatch key={t.id} theme={t} active={activeId === t.id} onClick={() => onSelect(t.id)} />
-              ))}
-            </div>
+      {tab === "browse" ? (
+        <div className="p-4">
+          {/* Search */}
+          <div className="relative mb-3">
+            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <circle cx="5" cy="5" r="3.5" /><path d="M8 8l2.5 2.5" />
+            </svg>
+            <input
+              value={search}
+              onChange={e => { setSearch(e.target.value); if (e.target.value) setExpanded(true); }}
+              placeholder="Search themes…"
+              className="w-full pl-7 pr-3 py-1.5 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400"
+            />
           </div>
-          <button onClick={() => setExpanded(false)}
-            className="mt-2 w-full text-[11px] text-slate-400 hover:text-slate-600 py-1 transition-colors">
-            Show less ▴
-          </button>
-        </>
+
+          {/* Section label */}
+          <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-2">
+            {search.trim() ? `${filteredAll.length} result${filteredAll.length !== 1 ? "s" : ""}` : expanded ? "All themes" : "Featured"}
+          </p>
+
+          {/* Grid */}
+          <div className="grid grid-cols-5 gap-2">
+            {displayThemes.map(t => (
+              <ThemeCard key={t.id} theme={t} active={activeId === t.id} onClick={() => onSelect(t.id)} />
+            ))}
+          </div>
+
+          {/* Expand / collapse */}
+          {!search.trim() && (
+            <button
+              onClick={() => setExpanded(v => !v)}
+              className="mt-3 w-full py-2 text-xs text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-50 border border-dashed border-slate-200 transition-colors font-medium"
+            >
+              {expanded ? "Show less ▴" : `See all themes (${allThemes.length}) ▾`}
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="p-4">
+          <p className="text-xs text-slate-500 mb-3 leading-relaxed">
+            Describe a vibe, mood, or concept — we'll generate a matching color palette for you.
+          </p>
+
+          {/* Prompt input */}
+          <div className="flex gap-2 mb-3">
+            <input
+              value={prompt}
+              onChange={e => setPrompt(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") applyGenerated(); }}
+              placeholder='e.g. "ice", "midnight forest", "warm coffee"'
+              className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg outline-none focus:border-slate-400 bg-slate-50 placeholder-slate-400"
+              autoFocus
+            />
+            <button
+              onClick={applyGenerated}
+              disabled={!previewTheme}
+              className="px-4 py-2 text-xs font-semibold text-white rounded-lg transition-colors disabled:opacity-40"
+              style={{ background: previewTheme?.accentColor ?? "#64748b" }}
+            >
+              Apply
+            </button>
+          </div>
+
+          {/* Examples */}
+          <div className="flex flex-wrap gap-1.5 mb-4">
+            {examples.map(ex => (
+              <button key={ex} onClick={() => setPrompt(ex)}
+                className="px-2.5 py-1 text-[10px] rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 transition-colors font-medium">
+                {ex}
+              </button>
+            ))}
+          </div>
+
+          {/* Live preview */}
+          {previewTheme && (
+            <div className="rounded-xl overflow-hidden border border-slate-200 shadow-sm">
+              {/* Palette strip */}
+              <div className="h-8 flex">
+                {[previewTheme.h1Color, previewTheme.accentColor, previewTheme.borderLight, previewTheme.bgTint, previewTheme.codeFg, previewTheme.codeBg].map((c, i) => (
+                  <span key={i} className="flex-1" style={{ background: c }} />
+                ))}
+              </div>
+              {/* Preview content */}
+              <div className="px-4 py-3" style={{ background: previewTheme.pageBg ?? "#f8fafc" }}>
+                <p className="text-sm font-bold mb-1" style={{ color: previewTheme.h1Color }}>
+                  {previewTheme.name}
+                </p>
+                <p className="text-xs mb-1" style={{ color: previewTheme.accentColor }}>
+                  Heading accent · Link color · Bullets
+                </p>
+                <p className="text-xs">
+                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono" style={{ background: previewTheme.codeBg, color: previewTheme.codeFg, border: `1px solid ${previewTheme.codeBorder}` }}>
+                    inline code
+                  </span>
+                  {" "}and{" "}
+                  <span style={{ color: previewTheme.accentColor, textDecoration: "underline", fontSize: "11px" }}>links</span>
+                </p>
+              </div>
+            </div>
+          )}
+
+          {!previewTheme && (
+            <div className="rounded-xl border border-dashed border-slate-200 py-8 text-center text-xs text-slate-400">
+              Type above to preview your generated theme
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -286,10 +436,11 @@ export default function MarkdownViewer() {
   const [fileName, setFileName] = useState<string | null>(() => lsGet(LS_FILENAME));
   const [viewMode, setViewMode] = useState<ViewMode>(() => (lsGet(LS_VIEW_MODE) as ViewMode) ?? "preview");
   const [themeId, setThemeId] = useState<string>(() => lsGet(LS_THEME) ?? "forest");
+  const [customTheme, setCustomTheme] = useState<Theme | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [showThemePicker, setShowThemePicker] = useState(false);
 
-  const activeTheme = themeMap[themeId] ?? themeMap["forest"];
+  const activeTheme = customTheme ?? themeMap[themeId] ?? themeMap["forest"];
   const themeVars = themeToVars(activeTheme);
 
   // ── Refs ──────────────────────────────────────────────────────────────────
@@ -527,8 +678,9 @@ export default function MarkdownViewer() {
               {showThemePicker && (
                 <ThemePicker
                   activeId={themeId}
-                  onSelect={(id) => { setThemeId(id); setShowThemePicker(false); }}
+                  onSelect={(id) => { setThemeId(id); setCustomTheme(null); setShowThemePicker(false); }}
                   onClose={() => setShowThemePicker(false)}
+                  onGenerated={(t) => { setCustomTheme(t); setShowThemePicker(false); }}
                 />
               )}
             </div>
