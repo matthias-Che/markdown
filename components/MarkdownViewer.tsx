@@ -12,6 +12,17 @@ import { SAMPLE_MARKDOWN } from "@/lib/sampleMarkdown";
 import themes, { themeMap, TOP_THEME_IDS, type Theme } from "@/lib/themes";
 import { generateThemeFromPrompt } from "@/lib/generateTheme";
 
+// Lazily imported to avoid SSR issues with mammoth's Buffer dependency
+async function docxToMarkdown(arrayBuffer: ArrayBuffer): Promise<string> {
+  const [mammoth, { default: TurndownService }] = await Promise.all([
+    import("mammoth"),
+    import("turndown"),
+  ]);
+  const { value: html } = await mammoth.convertToHtml({ arrayBuffer });
+  const td = new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced" });
+  return td.turndown(html);
+}
+
 type ViewMode = "preview" | "split" | "compare";
 
 // ── Tab data ──────────────────────────────────────────────────────────────────
@@ -1055,21 +1066,39 @@ export default function MarkdownViewer() {
 
   // ── File loading ──────────────────────────────────────────────────────────
   const loadFile = useCallback((file: File) => {
-    if (!file.name.endsWith(".md") && !file.name.endsWith(".markdown")) {
-      alert("Please upload a Markdown file (.md or .markdown).");
+    const isDocx = file.name.endsWith(".docx");
+    const isMd   = file.name.endsWith(".md") || file.name.endsWith(".markdown");
+    if (!isDocx && !isMd) {
+      alert("Please upload a Markdown (.md) or Word (.docx) file.");
       return;
     }
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      const label = file.name.replace(/\.(md|markdown)$/, "");
+
+    const applyContent = (text: string) => {
+      const ext = isDocx ? ".docx" : file.name.endsWith(".markdown") ? ".markdown" : ".md";
+      const label = file.name.slice(0, file.name.length - ext.length);
       dispatch({ type: "init", state: { stack: [text], index: 0 } });
       setTabs(prev => prev.map(t => t.id === activeTabId
         ? { ...t, content: text, fileName: file.name, label, bookmark: null, scrollRatio: 0 } : t));
       const el = activeScrollRef.current;
       if (el) el.scrollTop = 0;
     };
-    reader.readAsText(file);
+
+    if (isDocx) {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const markdown = await docxToMarkdown(e.target!.result as ArrayBuffer);
+          applyContent(markdown);
+        } catch {
+          alert("Could not parse the .docx file. It may be corrupted or encrypted.");
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => applyContent(e.target?.result as string);
+      reader.readAsText(file);
+    }
   }, [activeTabId, activeScrollRef]);
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1156,7 +1185,7 @@ export default function MarkdownViewer() {
           <div className="bg-white/90 backdrop-blur-xl rounded-2xl shadow-2xl border-2 border-dashed border-slate-300 px-16 py-12 text-center">
             <div className="text-5xl mb-3">📄</div>
             <p className="text-xl font-semibold text-slate-700">Drop your Markdown file</p>
-            <p className="text-sm text-slate-400 mt-1">Opens in the current tab</p>
+            <p className="text-sm text-slate-400 mt-1">.md or .docx · opens in current tab</p>
           </div>
         </div>
       )}
@@ -1241,7 +1270,7 @@ export default function MarkdownViewer() {
               </svg>
               Upload File
             </button>
-            <input ref={fileInputRef} type="file" accept=".md,.markdown" className="hidden" onChange={handleFileInput} />
+            <input ref={fileInputRef} type="file" accept=".md,.markdown,.docx" className="hidden" onChange={handleFileInput} />
           </div>
         </div>
 
@@ -1350,7 +1379,7 @@ export default function MarkdownViewer() {
 
       <div className="flex-shrink-0 py-2 text-center text-xs text-slate-400 border-t border-slate-100/80"
         style={{ background: "rgba(255,255,255,0.7)", backdropFilter: "blur(8px)" }}>
-        Drop a <code className="text-rose-500 bg-rose-50 px-1 py-0.5 rounded">.md</code> file anywhere · Double-click a tab to rename · Right-click a tab for colors
+        Drop a <code className="text-rose-500 bg-rose-50 px-1 py-0.5 rounded">.md</code> or <code className="text-blue-500 bg-blue-50 px-1 py-0.5 rounded">.docx</code> file anywhere · Double-click a tab to rename · Right-click a tab for colors
       </div>
     </div>
   );
